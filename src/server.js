@@ -83,6 +83,16 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { chrome: cdp, loggedIn, gaps: profileGaps(), profile: getProfile() });
     }
 
+    // ── GET /api/stats → job-bank counts (status/source/portal/channel) + actions ─
+    // Lightweight health + data endpoint: a 200 here means the dashboard server is up,
+    // and the body shows how many leads the scraper has collected so far.
+    if (req.method === 'GET' && url.pathname === '/api/stats') {
+      const { initDB, reloadIfChanged, counts } = await import('./tracker.js');
+      await initDB();
+      await reloadIfChanged();
+      return json(res, 200, { ok: true, stats: counts() });
+    }
+
     // ── POST /api/profile → save pasted fields ────────────────────────────────
     if (req.method === 'POST' && url.pathname === '/api/profile') {
       const body = await readBody(req);

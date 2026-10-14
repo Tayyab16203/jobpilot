@@ -29,6 +29,13 @@ import { assessJob, cvAttachmentForJob } from './cv.js';
 import { getEasyApplyLimit, maybeRefreshEasyApplyLimit } from './limits.js';
 
 const DRY = process.env.DRY === '1';
+// DATA-ONLY mode: when WORKER_DATA_ONLY=1 the worker runs ONLY the data lanes (scout + refresher)
+// — it scrapes leads into the DB and keeps the dashboard/playbook fresh, but NEVER emails,
+// applies, or connects on its own. All of that reasoning + outreach is left to the agent (Kiro),
+// which decides relevance, writes emails, and drives apply/connect through the MCP tools.
+// The evolver (self-evolution/PR) lane is independent: it stays on unless WORKER_NO_EVOLVE=1.
+const DATA_ONLY = process.env.WORKER_DATA_ONLY === '1';
+const NO_EVOLVE = process.env.WORKER_NO_EVOLVE === '1';
 const DAILY = { email: 50, easy: 80, form: 30, connect: 18 };
 // Relevance floors per channel. Lowered (per user request: "don't skip stuff") so fewer
 // borderline-but-real leads get dropped before we ever look at them — we'd rather see a
@@ -540,27 +547,33 @@ try { fs.rmSync(STOPFILE, { force: true }); } catch {}   // clear any stale stop
 try { await launchChrome(); } catch (e) { say('main', 'chrome launch issue (continuing): ' + (e.message || '').slice(0, 80)); }
 await initDB();
 // Keep the repo branch in sync with the main repo on startup (fork → rebase on upstream).
-if (!DRY && getProfile().consent?.autoContribute !== false) {
+// SKIPPED when NO_EVOLVE is set (data-only mode): the startup rebase/reset would otherwise wipe
+// local uncommitted/untracked changes — including the data-only + hook scripts — on every boot.
+if (!DRY && !NO_EVOLVE && getProfile().consent?.autoContribute !== false) {
   try { const { syncBranch } = await import('./contribute.js'); const s = await syncBranch(); say('main', `branch sync: ${s.synced ? 'in sync with ' + (s.upstream || 'origin') : 'skipped (' + (s.reason || '') + ')'}`); } catch {}
+} else if (NO_EVOLVE) {
+  say('main', 'data-only mode — skipping startup branch sync (local changes preserved)');
 }
 let uiPort = 7788;
 try { uiPort = await startServer() || 7788; } catch (e) { say('main', 'dashboard server issue (continuing): ' + (e.message || '').slice(0, 80)); }
 process.env.JOB_AGENT_PORT = String(uiPort);
-say('main', `worker start${DRY ? ' (DRY)' : ''} — concurrent lanes: scout · mailer · applier · connector · evolver`);
+// Build the active lane set. The DATA lanes (scout + refresher) always run. The ACTING lanes
+// (mailer · applier · connector) run only when NOT in data-only mode — in data-only mode the
+// agent (Kiro) owns all reasoning + outreach via the MCP tools. The evolver lane is independent.
+const lanes = [['scout', scout]];
+if (!DATA_ONLY) {
+  lanes.push(['mailer', mailer], ['applier', applier], ['connector', connector]);
+}
+if (!NO_EVOLVE) lanes.push(['evolver', evolver]);
+lanes.push(['refresher', refresher]);
+const laneNames = lanes.map(([n]) => n).join(' · ');
+say('main', `worker start${DRY ? ' (DRY)' : ''}${DATA_ONLY ? ' (DATA-ONLY — agent handles outreach)' : ''} — concurrent lanes: ${laneNames}`);
 say('main', `dashboard + Stop button live at http://127.0.0.1:${uiPort}`);
-beat('main', 'running', { uiPort });
+beat('main', 'running', { uiPort, dataOnly: DATA_ONLY });
 // Watchdog: when the Stop flag appears (UI/CLI), exit the whole process promptly.
 (async () => { while (!stopped()) await SLEEP(1500); say('main', '⏹ Stop requested — shutting down all lanes'); beat('main', 'stopped'); await SLEEP(500); process.exit(0); })();
 // Each lane runs under supervise(): a crash auto-restarts the lane, never the whole worker.
 // Promise.all resolves only when every lane returns (i.e. Stop was requested).
-// evolver is a FIRST-CLASS lane — PR/self-evolution has the same priority as job applying.
-await Promise.all([
-  supervise('scout', scout),
-  supervise('mailer', mailer),
-  supervise('applier', applier),
-  supervise('connector', connector),
-  supervise('evolver', evolver),
-  supervise('refresher', refresher),
-]);
+await Promise.all(lanes.map(([name, fn]) => supervise(name, fn)));
 beat('main', 'stopped');
 process.exit(0);
