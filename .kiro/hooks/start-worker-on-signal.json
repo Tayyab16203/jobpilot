@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Start Data Worker On Signal",
+      "trigger": "UserPromptSubmit",
+      "description": "On a prompt containing a start signal (e.g. \"start worker\"), launches the worker in data-only mode (scrape only). On a stop signal, halts it. Does nothing otherwise.",
+      "action": {
+        "type": "command",
+        "command": "node scripts/hook-start-worker.mjs",
+        "timeout": 60
+      }
+    }
+  ]
+}

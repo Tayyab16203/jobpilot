@@ -3,7 +3,10 @@
     "jobpilot": {
       "type": "stdio",
       "command": "node",
-      "args": ["${workspaceFolder}/start.js"]
+      "args": ["${workspaceFolder}/start.js"],
+      "env": {
+        "JOBPILOT_NO_AUTOWORKER": "1"
+      }
     }
   }
 }
