@@ -1,0 +1,56 @@
+{
+  "goal": "Continuously monitor, evolve, and contribute for the JobPilot job-automation server. The always-on worker (scripts/worker-forever.mjs) is already running and must keep running; never write data/.stop. Iterate the monitor + self-evolution + contribution loop until the user explicitly stops.",
+  "complete": false,
+  "updatedAt": "2026-10-14T13:40:00.000Z",
+  "notes": "This checklist is the per-step work-breakdown for the monitoring loop. Each pass: pick the first unchecked item, implement it, verify, commit, mark done. When a loop item is done it is reset to false on the next cycle so the loop keeps running.",
+  "items": [
+    {
+      "id": "verify-worker-running",
+      "title": "Confirm the always-on worker + debug Chrome are alive (worker-state.json heartbeat fresh, chrome ok). Never stop them.",
+      "done": true,
+      "result": "worker-state.json heartbeat fresh (cycle running, 5 lanes reporting); onboard_status reports chrome ok (Chrome/155). Did not write data/.stop."
+    },
+    {
+      "id": "check-onboarding-login",
+      "title": "Run onboard_status: profile gaps clear, LinkedIn + Gmail logged in. Prompt user in one line only if truly logged out.",
+      "done": true,
+      "result": "No profile gaps; open tabs show Gmail inbox + LinkedIn job searches active (logged in). CDP connect timeout is transient, not a logout."
+    },
+    {
+      "id": "answer-pending-questions",
+      "title": "Clear pending application questions via learn_answer, inferring from profile; ask user only when not inferable.",
+      "done": true,
+      "result": "Learned 6 of 7 pending answers from profile (DevOps=Yes, Agentic AI=Yes, Whisper/VAPI/OpenAI=Yes, multimedia-confidential=Yes, annotation/moderation=No, Master's field=CS/Software Dev). The 'research experience' question has blank options so it is left pending until options appear."
+    },
+    {
+      "id": "sync-fork-with-upstream",
+      "title": "Keep the fork in sync: rebase/fast-forward local main onto upstream/main so it never drifts behind.",
+      "done": true,
+      "result": "Fork main was 3 behind / 2 ahead of upstream/main; the 2 ahead were duplicate patches upstream already merged via PR #101. Rebased local main onto upstream/main (both duplicates auto-skipped), fast-forwarded to upstream merge 92dfb24, and force-with-lease pushed origin/main back into sync (0/0 vs upstream). CI security gate + node --check pass."
+    },
+    {
+      "id": "fix-stray-stop-sentinel",
+      "title": "Root-cause and fix the recurring 'worker stops instead of looping' bug: a stray data/.stop appeared while the worker was still beating. Remove it, relaunch the worker, file a GitHub issue, and fix the code so only an explicit user Stop halts the loop.",
+      "done": true,
+      "result": "Removed stray data/.stop (worker had exited; no node worker process remained) and relaunched via npm run worker:forever — fresh startedAt 13:32:31Z, all 6 lanes active (scout/mailer/applier/connector/evolver + main=running). Root cause: mcp-server.js shutdown hooks (exit/SIGINT/SIGTERM/stdin-end) wrote data/.stop on every MCP disconnect, killing the detached worker. Filed upstream issue maazbin/jobpilot#109 and fixed on branch self-evolve/no-stop-on-mcp-disconnect (commit af40e2c): removed the .stop-writing hooks + now-dead fs/path imports; only dashboard /api/stop and npm run stop write the sentinel. node --check + CI security gate pass."
+    },
+    {
+      "id": "triage-open-encounters",
+      "title": "Review open encounters from evolution_report; fix the top recurring one in code, resolve_encounter, then contribute_improvements.",
+      "done": true,
+      "result": "Re-triaged under the now-running worker. Top counts (connect #20 x48, lnkd.in #11 x5) are stale (last_seen 2026-10-12) and already addressed in connect.js/forms.js. Picked the freshest recurring one: jobicy #6 'submitted but no confirmation' (x8, last_seen 2026-10-13). Snapshot form-42caaa6965.html revealed the real cause: jobicy guest-apply submits into an email-OTP step (#step-verification/#code-inputs) + Cloudflare Turnstile (#turnstile-wrapper) that can't be automated, so the 20s confirm wait timed out and the lead was re-attempted. Fixed src/mcp/forms.js to detect that gate in the post-submit loop and return needs_manual early (route via email/connect). node --check + ci-security-scan pass. resolve_encounter #6 -> fixed. Committed 740ec1c."
+    },
+    {
+      "id": "contribute-and-review-prs",
+      "title": "Run contribute_improvements (fork: open cross-fork PR; after merge, re-sync). Review/merge any open self-evolve PRs that pass CI.",
+      "done": false,
+      "result": "In progress: fix committed on branch self-evolve/no-stop-on-mcp-disconnect (af40e2c). The worker's evolver lane (now running, phase 'contribute round') performs contributeRound() every ~10 min — it will sync upstream and open the cross-fork PR. MCP contribute_improvements tool was momentarily disconnected during the worker restart; the evolver lane covers it."
+    },
+    {
+      "id": "report-progress",
+      "title": "Report progress via get_stats + open_dashboard, then loop again (reset loop items to false).",
+      "done": false,
+      "result": ""
+    }
+  ]
+}

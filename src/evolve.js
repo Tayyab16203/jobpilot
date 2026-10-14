@@ -80,10 +80,25 @@ export async function encounter(area, detail, { url = '', page = null, scope = n
   if (page) {
     try {
       const base = path.join(EVO_DIR, `${area}-${h(area + sig)}`);
-      if (!fs.existsSync(base + '.png')) {
-        await page.screenshot({ path: base + '.png' }).catch(() => {});
-        const html = await (scope || page.locator('body')).evaluate(el => el.outerHTML).catch(() => '');
-        fs.writeFileSync(base + '.html', html
+      // Re-capture when we don't yet have a USEFUL html snapshot (missing or near-empty).
+      // The old guard keyed only on the .png existing, so a first-capture failure left a
+      // 0-byte .html that was never retried — which is why stuck pages couldn't be diagnosed.
+      let haveGood = false;
+      try { haveGood = fs.existsSync(base + '.html') && fs.statSync(base + '.html').size > 200; } catch {}
+      if (!haveGood) {
+        await page.screenshot({ path: base + '.png', fullPage: false }).catch(() => {});
+        // Prefer the dialog/scope DOM; fall back to any open dialog, then the body.
+        let html = '';
+        for (const getter of [
+          () => scope ? scope.evaluate(el => el.outerHTML) : Promise.resolve(''),
+          () => page.locator('dialog[open], div[role="dialog"]').first().evaluate(el => el.outerHTML),
+          () => page.evaluate(() => (document.querySelector('dialog[open], div[role="dialog"]') || document.body).outerHTML),
+          () => page.locator('body').evaluate(el => el.outerHTML),
+        ]) {
+          html = await getter().catch(() => '');
+          if (html && html.length > 200) break;
+        }
+        fs.writeFileSync(base + '.html', String(html)
           .replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<svg[\s\S]*?<\/svg>/g, '')
           .slice(0, 200000));
       }

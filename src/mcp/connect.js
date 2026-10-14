@@ -40,6 +40,28 @@ async function mainCol(page, re) {
   return null;
 }
 
+// LinkedIn opens a Premium upsell ("Send unlimited personalized invites with Premium" /
+// "You're out of free custom notes") instead of the note editor once the free custom-note quota
+// is exhausted — see the saved connect encounter (screenshot shows the modal with only a
+// Dismiss/Close × and an "Upgrade to Premium" button; no Send/textarea). A connection request
+// should not fail just because an optional note is unavailable, so detect + dismiss it everywhere
+// an invite note path can be reached, then continue sending the invite note-less.
+// Returns true when the upsell was present and dismissed, else false.
+async function dismissPremiumUpsell(page) {
+  const copyRe = /out of free custom notes|send unlimited personalized invites|unlimited personalized invites with premium|upgrade to premium|restart premium/i;
+  const bodyText = await page.locator('body').innerText().catch(() => '');
+  const premiumCopy = page.getByText(copyRe).first();
+  const premiumDialog = premiumCopy.locator('xpath=ancestor::*[@role="dialog"][1]');
+  const premiumVisible = await premiumDialog.isVisible().catch(() => false);
+  if (!premiumVisible && !copyRe.test(bodyText)) return false;
+  const dismiss = premiumVisible
+    ? premiumDialog.getByRole('button', { name: /dismiss|close/i }).first()
+    : page.getByRole('button', { name: /dismiss|close/i }).last();
+  await dismiss.click({ timeout: 2500 }).catch(() => page.keyboard.press('Escape').catch(() => {}));
+  await SLEEP(800);
+  return true;
+}
+
 export async function connect({ profileUrl, posterName, role, company, withNote = true, dryRun = false }) {
   const ctx = await getContext();
   const page = await ctx.newPage();
@@ -133,6 +155,10 @@ export async function connect({ profileUrl, posterName, role, company, withNote 
           else if (process.env.DEBUG_CONN) console.log('custom-invite: no note textarea, sending note-less');
         }
       }
+      // The note editor is frequently replaced by the "out of free custom notes" Premium upsell
+      // (the saved encounter #20 screenshot). Dismiss it and send the invite note-less rather than
+      // falling into the submit-retry loop against the upsell/ad-dialog Submit buttons.
+      if (await dismissPremiumUpsell(page)) usedNote = false;
       if (dryRun) {
         await page.goBack().catch(() => {});
         await page.close();
@@ -156,24 +182,30 @@ export async function connect({ profileUrl, posterName, role, company, withNote 
         const vis = await submitOnPage.isVisible().catch(() => false);
         const en = await submitOnPage.isEnabled().catch(() => false);
         if (vis && en) { submitReady = true; break; }
-        // Also check by JS scan (obfuscated classes may prevent Playwright enable detection)
+        // Also check by JS scan (obfuscated classes may prevent Playwright enable detection).
+        // Only consider a submit button that lives in a form/dialog with a textarea (the invite
+        // note form) and is NOT in the aside — a bare first `button[type="submit"]` can be an aside
+        // ad-feedback dialog's "Submit", which never belongs to the invite.
         if (i >= 1) {
           const jsEnabled = await page.evaluate(() => {
-            const btn = document.querySelector('button[type="submit"], input[type="submit"]');
-            return btn ? (!btn.disabled && btn.offsetParent !== null) : false;
+            const scope = document.querySelector('form:has(textarea), div[role="dialog"]:has(textarea), dialog:has(textarea)');
+            const btn = (scope || document).querySelector('button[type="submit"], input[type="submit"]');
+            return btn ? (!btn.closest('aside') && !btn.disabled && btn.offsetParent !== null) : false;
           }).catch(() => false);
           if (jsEnabled) { submitReady = true; break; }
         }
         // Also scan for any visible enabled send button by text (LinkedIn 2026 uses "Send" text)
         if (i % 2 === 1) {
-          const wideSend = page.getByRole('button', { name: /send without a note|send invitation|send now|^send$|^submit$/i }).first();
+          const wideSend = page.getByRole('button', { name: /send without a note|send invitation|send now|^send$/i }).first();
           const wVis = await wideSend.isVisible().catch(() => false);
           const wEn = await wideSend.isEnabled().catch(() => false);
           if (wVis && wEn) { submitEl = wideSend; submitReady = true; break; }
-          // JS scan for any enabled button with send-like text (handles obfuscated classes)
+          // JS scan for any enabled button with send-like text (handles obfuscated classes),
+          // excluding aside buttons so the sidebar/ad-dialog controls never match.
           const jsSendBtn = await page.evaluate(() => {
             const btns = [...document.querySelectorAll('button, input[type="submit"]')];
             return btns.some(b => {
+              if (b.closest('aside')) return false;
               const txt = (b.textContent || b.value || b.getAttribute('aria-label') || '').trim().toLowerCase();
               return /^send$|send invitation|send without a note|send now/.test(txt) && !b.disabled && b.offsetParent !== null;
             });
@@ -190,8 +222,12 @@ export async function connect({ profileUrl, posterName, role, company, withNote 
           const btns = [...document.querySelectorAll('button, input[type="submit"]')];
           const target = btns.find(b => {
             if (b.offsetParent === null) return false;
+            if (b.closest('aside')) return false; // never the aside ad-feedback "Submit" buttons
             const txt = (b.textContent || b.value || b.getAttribute('aria-label') || '').trim().toLowerCase();
-            const isSend = /^send$|^submit$|send invitation|send without a note|send now/.test(txt) || b.type === 'submit';
+            // A type=submit only counts when it sits in a form/dialog that also has the note
+            // textarea — otherwise it may be an unrelated ad-feedback Submit outside the invite.
+            const inNoteForm = !!b.closest('form:has(textarea), div[role="dialog"]:has(textarea), dialog:has(textarea)');
+            const isSend = /^send$|send invitation|send without a note|send now/.test(txt) || (b.type === 'submit' && inNoteForm);
             return isSend;
           });
           if (target) { target.disabled = false; target.click(); return true; }
@@ -239,22 +275,9 @@ export async function connect({ profileUrl, posterName, role, company, withNote 
         if (await ta.isVisible().catch(() => false)) { await ta.fill(note); await SLEEP(400); usedNote = true; }
         else if (process.env.DEBUG_CONN) console.log('textarea not visible after addNote');
 
-        // LinkedIn opens a Premium upsell instead of the note editor once the
-        // free custom-note quota is exhausted. Dismiss it and continue with a
-        // normal invitation; a connection request should not fail just because
-        // an optional note is unavailable.
-        const premiumText = await page.locator('body').innerText().catch(() => '');
-        const premiumCopy = page.getByText(/out of free custom notes|send unlimited personalized invites/i).first();
-        const premiumDialog = premiumCopy.locator('xpath=ancestor::*[@role="dialog"][1]');
-        const premiumVisible = await premiumDialog.isVisible().catch(() => false);
-        if (premiumVisible || /out of free custom notes|send unlimited personalized invites|restart premium/i.test(premiumText)) {
-          usedNote = false;
-          const dismiss = premiumVisible
-            ? premiumDialog.getByRole('button', { name: /dismiss|close/i }).first()
-            : page.getByRole('button', { name: /dismiss|close/i }).last();
-          await dismiss.click({ timeout: 2500 }).catch(() => page.keyboard.press('Escape').catch(() => {}));
-          await SLEEP(800);
-        }
+        // Free custom-note quota exhausted → LinkedIn shows the Premium upsell instead of the
+        // note editor. Dismiss it and continue with a note-less invitation.
+        if (await dismissPremiumUpsell(page)) usedNote = false;
       } else {
         // LinkedIn 2026: no intermediate "Add a note" button — textarea may be directly visible in the dialog
         const ta = page.locator('dialog textarea, div[role="dialog"] textarea').first();
@@ -262,6 +285,10 @@ export async function connect({ profileUrl, posterName, role, company, withNote 
           await ta.fill(note).catch(() => {});
           await SLEEP(400);
           usedNote = true;
+        } else if (await dismissPremiumUpsell(page)) {
+          // No note textarea because the "out of free custom notes" Premium upsell took its place.
+          // Dismiss it and continue to the Send/pending detection, sending note-less.
+          usedNote = false;
         }
       }
     }
@@ -272,9 +299,13 @@ export async function connect({ profileUrl, posterName, role, company, withNote 
     // dialog — that filter ignores disabled buttons, so it fails while the send button is
     // briefly disabled/animating after open.  Instead find the dialog by its always-present
     // dismiss/close button, then look for send within it with a generous retry loop.
-    // LinkedIn 2026 uses "Send" / "Send invitation" / "Send without a note" / "Submit"
-    // in native <dialog> elements. Include "Submit" for the native dialog submit button.
-    const SEND_RE = /send without a note|send invitation|send now|^send$|^submit$/i;
+    // LinkedIn 2026 uses "Send" / "Send invitation" / "Send now" / "Send without a note"
+    // in native <dialog> elements. The blanket `^submit$` was dropped: the snapshot proves the
+    // only `type="submit"` "Submit" buttons on this page belong to the aside ad-feedback dialogs
+    // ("Ad Options" / "Don't want to see this"), and matching them was the dominant cause of the
+    // ×48 "send button not found" misfire. The real invite submit is reached via the dialog-scoped
+    // `button[type="submit"]` lookup below, which requires a note textarea in the same scope.
+    const SEND_RE = /send without a note|send invitation|send now|^send$/i;
     // Wait up to 8 s for ANY dialog/modal to appear after the Connect/Add-note click.
     // The 2026 LinkedIn UI uses obfuscated gfl* class names — we can't rely on .artdeco-modal.
     // Cast a wide net: div[role="dialog"], native <dialog[open]>, any element with a dismiss/close
@@ -294,10 +325,15 @@ export async function connect({ profileUrl, posterName, role, company, withNote 
     const dlgCount = await inviteDlg.count().catch(() => 0);
     const dlgScope = dlgCount ? inviteDlg : page;
     let send = dlgScope.getByRole('button', { name: SEND_RE }).first();
-    // Also try type=submit within the dialog scope (LinkedIn 2026 native <dialog> uses it).
+    // Also try type=submit — but ONLY inside a form/dialog that also holds the note textarea,
+    // mirroring the custom-invite block. A bare dialog-wide `type="submit"` also matches the aside
+    // ad-feedback dialogs' "Submit" buttons (snapshot offsets 61863 / 120093), which never belong
+    // to an invite and never enable — that false match drove the ×48 "send button not found".
     // NOTE: after filling the textarea (usedNote=true), the submit button becomes enabled —
     // check for it regardless of enabled state first, then wait for it to enable.
-    const submitBtn = dlgScope.locator('button[type="submit"], input[type="submit"]').first();
+    const submitScope = page.locator('form:has(textarea), div[role="dialog"]:has(textarea), dialog:has(textarea)').first();
+    const submitScopeCount = await submitScope.count().catch(() => 0);
+    const submitBtn = (submitScopeCount ? submitScope : dlgScope).locator('button[type="submit"], input[type="submit"]').first();
     // Retry up to 14×800 ms — the send button starts disabled and enables after the dialog animates in.
     let sendVisible = false;
     for (let i = 0; i < 14 && !sendVisible; i++) {
@@ -329,8 +365,8 @@ export async function connect({ profileUrl, posterName, role, company, withNote 
 
       // Secondary scan: LinkedIn 2026 UI may render the send button outside the dialog scope
       // or use aria-label variations not matched by the role query above.
-      const secondarySend = page.locator('button').filter({ hasText: /^send$/i })
-        .or(page.locator('[aria-label*="send" i]')).first();
+      const secondarySend = page.locator('button:not(aside button)').filter({ hasText: /^send$/i })
+        .or(page.locator('[aria-label*="send" i]:not(aside [aria-label*="send" i])')).first();
       if (await secondarySend.isVisible().catch(() => false)) {
         await secondarySend.click({ timeout: 5000 }).catch(() => {});
         await SLEEP(3000);
@@ -345,6 +381,7 @@ export async function connect({ profileUrl, posterName, role, company, withNote 
       const jsSent = await page.evaluate(() => {
         const buttons = [...document.querySelectorAll('button, input[type="submit"]')];
         const sendBtn = buttons.find(b => {
+          if (b.closest('aside')) return false; // never the aside ad-feedback / sidebar buttons
           const txt = (b.textContent || b.value || b.getAttribute('aria-label') || '').trim().toLowerCase();
           return /^send$|send invitation|send without a note|send now/.test(txt) &&
                  b.offsetParent !== null && !b.disabled;

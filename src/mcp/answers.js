@@ -23,12 +23,22 @@ function ans(p, key, dflt = '') {
 /** Approximate USD exchange rates for salary conversion. */
 const FX = { usd: 1, eur: 0.92, gbp: 0.79, pkr: 280, inr: 84, aed: 3.67, cad: 1.37 };
 
-const CURRENT_SALARY_RE = /\b(current|present|existing|currently\s+(earn|make)|current\s+(pay|salary|compensation))\b/;
+const CURRENT_SALARY_RE = /\b(current|present|existing|currently\s+(earn|make)|current\s+(pay|salary|compensation))\b|were you (making|earning|paid)|previous (role|job).*(salary|pay|making)|last drawn|present ctc/;
 
-function requestedCurrency(q, fallback = 'usd') {
-  return Object.keys(FX).find(c => q.includes(c))
-    || (/\$|dollar/.test(q) ? 'usd' : /€/.test(q) ? 'eur' : /£/.test(q) ? 'gbp'
-      : /rupee|\brs\b/.test(q) ? (fallback === 'inr' ? 'inr' : 'pkr') : fallback);
+// Detect the currency a salary question asks for. DEFAULT is PKR (the user's home market) —
+// only switch to another currency when the question explicitly names it (USD/$/dollar, etc.).
+// This is why a bare "What is your desired salary?" must map to PKR, not USD.
+function requestedCurrency(q, fallback = 'pkr') {
+  if (/\busd\b|us ?dollar|u\.s\. ?dollar|\$/.test(q)) return 'usd';
+  if (/€|\beur\b|euro/.test(q)) return 'eur';
+  if (/£|\bgbp\b|pound/.test(q)) return 'gbp';
+  if (/\binr\b|\brupees? \(india\)|indian rupee/.test(q)) return 'inr';
+  if (/\baed\b|dirham/.test(q)) return 'aed';
+  if (/\bcad\b|canadian/.test(q)) return 'cad';
+  const named = Object.keys(FX).find(c => new RegExp(`\\b${c}\\b`).test(q));
+  if (named) return named;
+  if (/\bpkr\b|rupee|\brs\b|pakistan/.test(q)) return 'pkr';
+  return fallback; // PKR by default
 }
 
 function requestedPeriod(q, fallback = 'month') {
@@ -36,23 +46,40 @@ function requestedPeriod(q, fallback = 'month') {
     : /hour|hourly|\/hr/.test(q) ? 'hour' : fallback;
 }
 
+// Pick the salaryExpectations entry matching the requested currency; fall back to the PKR
+// entry, then any entry, then the legacy single salary. Returns the entry plus the resolved
+// currency so the caller never guesses.
 function salaryExpectation(p, q) {
+  const wantCurrent = CURRENT_SALARY_RE.test(q);
+  const cur = requestedCurrency(q, 'pkr');
   const entries = Array.isArray(p.salaryExpectations)
-    ? p.salaryExpectations.filter(x => x && (+x.min || +x.max)) : [];
-  const legacy = p.salary || {};
-  const current = p.currentSalary || {};
-  if (CURRENT_SALARY_RE.test(q)) return current.amount ? current : null;
-  if (!entries.length) return legacy.amount ? { ...legacy, min: legacy.amount, max: legacy.amount } : null;
+    ? p.salaryExpectations.filter(x => x && (+x.min || +x.max || +x.current || +x.amount)) : [];
 
-  const qCurrency = requestedCurrency(q, '');
-  const explicitCountry = entries.find(x => x.country && q.includes(String(x.country).toLowerCase()));
-  const currencyMatch = qCurrency && entries.find(x => String(x.currency || '').toLowerCase() === qCurrency);
-  const broad = entries.find(x => /world|global|anywhere|default/i.test(String(x.country || '')));
-  const selected = explicitCountry || currencyMatch || broad || entries[0];
+  // Prefer an entry whose currency matches the question's currency.
+  let selected = entries.find(x => String(x.currency || '').toLowerCase() === cur)
+    || entries.find(x => String(x.currency || '').toLowerCase() === 'pkr')
+    || entries[0];
+
+  // Fall back to the legacy single salary / currentSalary objects.
+  if (!selected) {
+    const legacy = p.salary || {};
+    const current = p.currentSalary || {};
+    const base = wantCurrent && current.amount ? current : legacy;
+    if (!base || !(base.amount || base.min)) return null;
+    selected = { currency: base.currency || 'pkr', period: base.period || 'month', min: +base.amount || +base.min || 0, max: +base.max || +base.amount || 0, current: +current.amount || +base.amount || 0 };
+  }
+
+  const period = selected.period || 'month';
+  const min = +selected.min || +selected.max || +selected.amount || 0;
+  const max = +selected.max || +selected.min || +selected.amount || 0;
+  const currentVal = +selected.current || +((p.currentSalary || {}).amount) || 0;
   return {
-    ...selected,
-    min: +selected.min || +selected.max || 0,
-    max: +selected.max || +selected.min || 0,
+    currency: String(selected.currency || cur || 'pkr').toLowerCase(),
+    period,
+    min, max,
+    // When the question asks for CURRENT pay, surface the current figure as the value.
+    value: wantCurrent ? (currentVal || min) : (min || currentVal),
+    isCurrent: wantCurrent,
   };
 }
 
@@ -72,21 +99,22 @@ function formatSalaryValue(value, currency, period) {
 export function salaryFor(q, p, numeric = false) {
   q = String(q || '').toLowerCase();
   const s = salaryExpectation(p, q);
-  if (!s) {
-    const fallback = CURRENT_SALARY_RE.test(q) ? ans(p, 'current salary', null) : ans(p, 'salary', null);
-    return fallback || (numeric ? null : 'Negotiable');
-  }
-  const baseCur = String(s.currency || 'usd').toLowerCase();
-  const cur = requestedCurrency(q, baseCur);
+  if (!s) return numeric ? null : 'Negotiable';
+
+  const baseCur = s.currency;                 // currency the stored figure is in
+  const cur = requestedCurrency(q, 'pkr');     // currency the QUESTION wants (PKR default)
   const period = requestedPeriod(q, s.period || 'month');
   const basePeriod = s.period || 'month';
-  const toMonthly = value => basePeriod === 'year' ? value / 12 : basePeriod === 'hour' ? value * 160 : value;
-  const fromMonthly = value => period === 'year' ? value * 12 : period === 'hour' ? value / 160 : value;
-  const convert = value => formatSalaryValue(fromMonthly(toMonthly(value) / (FX[baseCur] || 1) * (FX[cur] || 1)), cur, period);
-  const min = convert(+s.min || +s.amount || 0);
-  const max = convert(+s.max || +s.min || +s.amount || 0);
-  // Numeric form controls cannot represent a range; use the lower bound.
-  return numeric ? String(min) : min === max ? String(min) : `${min}-${max}`;
+  const toMonthly = v => basePeriod === 'year' ? v / 12 : basePeriod === 'hour' ? v * 160 : v;
+  const fromMonthly = v => period === 'year' ? v * 12 : period === 'hour' ? v / 160 : v;
+  // Convert from the stored currency to the requested currency via the USD table.
+  const convert = v => formatSalaryValue(fromMonthly(toMonthly(v) / (FX[baseCur] || 1) * (FX[cur] || 1)), cur, period);
+
+  // Current-pay questions → single current figure. Expected → min (numeric) or min-max range.
+  if (s.isCurrent) return String(convert(s.value || s.min || 0));
+  const min = convert(s.min || s.value || 0);
+  const max = convert(s.max || s.min || 0);
+  return numeric ? String(min) : (min === max ? String(min) : `${min}-${max}`);
 }
 
 /**
@@ -105,11 +133,36 @@ export function textAnswer(question, { numeric = false } = {}) {
   const L = p.links || {};
   const [first, ...rest] = (p.name || '').split(' ');
 
-  // 1. Evolution memory (user-taught or harvested) — highest trust
+  // 0. GENERIC "how many years of experience" questions: always answer from the profile's
+  //    yearsExperience, BEFORE any fuzzy learned-answer lookup. Fuzzy matching across the
+  //    many harvested "how many years of X" entries (some 0/1/2 for techs the user hasn't
+  //    used) was leaking a wrong low number into unrelated role-experience questions.
+  //    Only skip this shortcut when the question names a SPECIFIC technology that the user
+  //    has an explicit per-tech answer for (those are handled by the normal learned lookup).
+  const yrsProfile = p.yearsExperience ? String(p.yearsExperience) : '';
+  const isGenericYears = /\bhow many years?\b|\byears? of (hands-on |professional |work |commercial |relevant |overall |total )*(experience|exp)\b/i.test(q)
+    && !/\b(with|in)\s+[a-z]/i.test(q.replace(/years? of (hands-on|professional|work|commercial|relevant|overall|total)/gi, ''));
+  if (yrsProfile && isGenericYears) {
+    recordAgentAnswer(question, yrsProfile, 'yearsExperience from profile (generic years question)');
+    return yrsProfile;
+  }
+
+  // 0b. SALARY/compensation questions: route straight to the deterministic, currency-aware
+  //     salaryFor() — the single source of truth — before any learned/profile-answer override
+  //     (those were storing verbose strings like "280,000 PKR/month (negotiable)" that don't
+  //     fit numeric fields or respect the question's currency).
+  if (/salary|compensation|\bctc\b|expected pay|pay expectation|remuneration|were you making|desired (pay|salary)|current (pay|salary)/.test(q)) {
+    const sal = salaryFor(question, p, numeric);
+    if (sal != null && sal !== '') { recordAgentAnswer(question, sal, 'currency-aware salaryFor'); return sal; }
+  }
+
+  // 1. Evolution memory (user-taught or harvested) — highest trust.
+  //    Guard: never accept a numeric '0' from a HARVESTED answer for a years question — that is
+  //    almost always a different tech harvested as 0 that fuzzy-matched. User-set 0 is kept.
   const learned = learnedAnswer(question);
   if (learned != null && !(numeric && isNaN(parseFloat(learned)))) {
-    usedAnswer(question);
-    return learned;
+    const badHarvestedZero = numeric && /year/i.test(q) && parseFloat(learned) === 0;
+    if (!badHarvestedZero) { usedAnswer(question); return learned; }
   }
 
   // 2. profile.answers key overrides (multi-word fuzzy match)
@@ -173,6 +226,42 @@ export function textAnswer(question, { numeric = false } = {}) {
     // Record that the agent answered this from profile context so user can see it
     recordAgentAnswer(question, derived, basis);
     return derived;
+  }
+
+  // Last resort for OPEN-ENDED free-text screening questions (non-numeric only).
+  // Rather than parking a genuine, relevant application as needs_answers because the
+  // question is open-ended ("how have you...", "describe...", "list the tools...",
+  // "experience with..."), generate a concise, profile-grounded answer. This is the
+  // single biggest reason target-role Easy Applies stalled instead of submitting.
+  if (!numeric && q.length > 10) {
+    // Yes/No-phrased questions rendered as FREE TEXT ("Have you built ...?", "Do you have
+    // experience ...?"): a plain "Yes" is correct and fits tight character limits. Checked
+    // BEFORE the open-ended gate so phrasings like "have you built" aren't missed.
+    if (/^(do|have|are|can|did|were|is|was) (you|your)\b/.test(q) && /\?|experience|worked|built|familiar|comfortable|able|ever/.test(q)) {
+      recordAgentAnswer(question, 'Yes', 'standard yes for yes/no-phrased free-text question');
+      return 'Yes';
+    }
+    const openEnded = /\b(describe|explain|how (have|did|do|would|many) you|tell us|list( all)?|what (other )?(tools|languages?|technologies|frameworks|platforms|software)|which (tools|languages?|technologies)|experience (with|in|building|scaling)|walk us through|give an example|elaborate|briefly|what is your|what are your|why )/.test(q);
+    if (openEnded) {
+      let v = null; let b = 'profile-grounded open-ended answer';
+      if (/\b(language|languages)\b/.test(q) && /proficien|speak|business|fluent|other/.test(q)) {
+        // Spoken/business languages, not programming.
+        v = ans(p, 'languages', '') || ans(p, 'spoken languages', '') || 'English (professional/fluent) and Urdu (native).';
+        b = 'spoken languages';
+      } else if (/\b(tools|software|platforms|technologies|frameworks|stack|tech)\b/.test(q)) {
+        v = `${(p.skills || []).join(', ')}.`.trim();
+        b = 'skills list from profile';
+      } else {
+        // General technical/behavioral prose grounded in skills + projects + summary.
+        v = coverText(p);
+        b = 'generated from CV/projects/summary';
+      }
+      if (v && String(v).trim()) {
+        v = String(v).slice(0, 1400);
+        recordAgentAnswer(question, v, b);
+        return v;
+      }
+    }
   }
 
   return null;

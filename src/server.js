@@ -118,10 +118,15 @@ const server = http.createServer(async (req, res) => {
       try { fs.writeFileSync(path.join(DATA, '.stop'), new Date().toISOString()); } catch {}
       return json(res, 200, { ok: true, detail: 'Stop requested — the worker will halt within a few seconds. Your logged-in Chrome stays open.' });
     }
-    // ── POST /api/consent → user opts in/out of auto-contribution ──────────────
+    // ── POST /api/consent → user opts in/out of auto-contribution (code/doc push) ──
+    // NOTE: brain control is NOT consent-gated (it is always-on, core behavior). The only consent
+    // here is autoContribute — whether code/doc fixes are pushed to GitHub.
     if (req.method === 'POST' && url.pathname === '/api/consent') {
       const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
-      const saved = updateProfile({ consent: { autoContribute: !!body.autoContribute } });
+      // Only patch the key(s) actually present so one toggle never clobbers the other.
+      const patch = {};
+      if ('autoContribute' in body) patch.autoContribute = !!body.autoContribute;
+      const saved = updateProfile({ consent: patch });
       return json(res, 200, { ok: true, consent: saved.consent });
     }
     // ── POST /api/tailored-cv-consent → explicit approval gate ────────────────
@@ -274,6 +279,11 @@ input:focus,textarea:focus{outline:none;border-color:#6366f1}
 </div>
 
 <div class="card">
+  <h2>🧠 Brain-driven (always on)</h2>
+  <div class="sub" style="margin:-6px 0 0">JobPilot is driven by a reasoning brain: your installed coding-agent CLIs (Codex · Grok · Claude · Gemini) decide relevance, write outreach, and perform every apply/email/connect — the worker only gathers leads. This is core behavior and always on; it is <b>not</b> a setting. <b>Strictly CLIs — no API keys are ever used or stored.</b> Only pushing code/doc fixes to GitHub is consent-gated (toggle on the dashboard), and the brain can never commit your data or credentials.</div>
+</div>
+
+<div class="card">
   <h2>💰 The things the agent should never guess</h2>
   <div class="sub" style="margin:-6px 0 10px">So it can answer screening questions without pausing to ask you.</div>
   <div class="row">
@@ -293,6 +303,9 @@ input:focus,textarea:focus{outline:none;border-color:#6366f1}
   </div>
   <label>Notice period</label>
   <input type="text" id="notice" value="${(p.answers || {})['notice period'] || ''}" placeholder="2 weeks">
+  <label>Max application emails per day — <b>leave blank or 0 for unlimited</b></label>
+  <input type="text" id="maxEmailsPerDay" value="${p.limits?.maxEmailsPerDay || ''}" placeholder="unlimited">
+  <div class="sub" style="margin:6px 0 0">Emailing goes through your own Gmail, so there's no account-restriction risk — the agent decides the pace. Set a number only if you want a hard ceiling.</div>
 </div>
 
 <div class="card">
@@ -361,6 +374,7 @@ $('save').onclick = async () => {
     links: { linkedin: $('linkedin').value, github: $('github').value, portfolio: $('portfolio').value, website: $('website').value },
     preferences: { roles: parseList($('roles').value), skip: parseList($('skip').value), avoidCompanies: parseList($('avoidCompanies').value), locationScope: $('locationScope').value, allowTailoredCv: $('allowTailoredCv').checked },
     loggedInSources: parseList($('sources').value),
+    limits: { maxEmailsPerDay: parseInt($('maxEmailsPerDay').value) || 0 },
     answers,
   };
   $('saveStatus').textContent = 'Saving…';

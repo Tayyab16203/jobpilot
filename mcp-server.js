@@ -4,8 +4,6 @@
 // The CLIENT's LLM is the brain; this server is the hands + memory.
 //
 // Run:  node mcp-server.js   (stdio transport)
-import fs from 'fs';
-import path from 'path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -16,9 +14,10 @@ import { getProfile, updateProfile, profileGaps, isOnboarded } from './src/profi
 import { cdpStatus, listTabs, verifyLogins } from './src/agent/browser.js';
 import { scrapePublicSource, scrapeBrowserSite, scrapeLinkedInPosts, PUBLIC_SOURCES, SITE_PRESETS } from './src/mcp/scrape.js';
 import { fillAndSubmit, linkedinEasyApply, linkedinDM, linkedinConnect } from './src/mcp/apply.js';
-import { easyApply } from './src/mcp/easyapply.js';
+import { easyApply, inspectEasyApply, applyEasyApplyWithAnswers } from './src/mcp/easyapply.js';
 import { applyForm } from './src/mcp/forms.js';
 import { connect as liConnect } from './src/mcp/connect.js';
+import { commentInterested } from './src/mcp/comment.js';
 import { liPosts, liJobs, hnHiring, redditHiring, publicBoards } from './src/mcp/sources.js';
 import { initEvolve, pendingQuestions, allAnswers, learn, openEncounters, resolveEncounter, writePlaybook, strategyTable } from './src/evolve.js';
 import { buildQueries, buildListingQueries } from './src/mcp/queries.js';
@@ -241,6 +240,47 @@ const TOOLS = [
       }));
     },
   },
+  {
+    name: 'easyapply_inspect',
+    description: "Open a LinkedIn Easy Apply and return the FULL ordered field list across ALL pages WITHOUT submitting — each {question, type (text|long-text|single-choice|multi-choice|select|file), options, maxlength, required, page}. Use this to READ an unfamiliar form so YOU reason over every question with the user's CV + profile, then answer via easyapply_apply_with_answers. Every form differs: inspect first, think, then fill.",
+    inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+    handler: async ({ url }) => ok(await inspectEasyApply({ url })),
+  },
+  {
+    name: 'easyapply_apply_with_answers',
+    description: "Submit a LinkedIn Easy Apply using YOUR reasoned answers. `answers` maps each question's text (from easyapply_inspect) to your answer: a string for text/select/single-choice, an array (or comma string) for multi-choice (e.g. timezones — pick any; the user can work any). Omissions fall back to the built-in engine. Fills radios/checkboxes/selects/text robustly (handles 2026 empty-label 0x0 inputs), advances every page, submits, verifies. result: applied|stuck|already_applied|no_easy_apply|closed|error. On stuck it returns the blocking fields so you can refine and retry.",
+    inputSchema: { type: 'object', properties: { url: { type: 'string' }, answers: { type: 'object' }, dryRun: { type: 'boolean' } }, required: ['url', 'answers'] },
+    handler: async ({ url, answers = {}, dryRun = false }) => {
+      const limit = getProfile().limits.maxAttemptsPerJob;
+      return ok(await timed('easyapply_apply_with_answers', url, { url }, limit, async () => {
+        const r = await applyEasyApplyWithAnswers({ url, answers, dryRun });
+        if (r.result === 'applied' || r.result === 'already_applied') setStatus(url, 'applied', r.detail);
+        writeDash();
+        return r;
+      }));
+    },
+  },
+
+  {
+    name: 'easyapply_inspect',
+    description: "Open a LinkedIn Easy Apply and return the FULL ordered field list across ALL pages WITHOUT submitting — each {question, type (text|long-text|single-choice|multi-choice|select|file), options, maxlength, required, page}. Use this to READ an unfamiliar form so YOU reason over every question with the user's CV + profile, then answer via easyapply_apply_with_answers. Every form differs: inspect first, think, then fill.",
+    inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+    handler: async ({ url }) => ok(await inspectEasyApply({ url })),
+  },
+  {
+    name: 'easyapply_apply_with_answers',
+    description: "Submit a LinkedIn Easy Apply using YOUR reasoned answers. `answers` maps each question's text (from easyapply_inspect) to your answer: a string for text/select/single-choice, an array (or comma string) for multi-choice (e.g. timezones — pick any; the user can work any). Omissions fall back to the built-in engine. Fills radios/checkboxes/selects/text robustly (handles 2026 empty-label 0x0 inputs), advances every page, submits, verifies. result: applied|stuck|already_applied|no_easy_apply|closed|error. On stuck it returns the blocking fields so you can refine and retry.",
+    inputSchema: { type: 'object', properties: { url: { type: 'string' }, answers: { type: 'object' }, dryRun: { type: 'boolean' } }, required: ['url', 'answers'] },
+    handler: async ({ url, answers = {}, dryRun = false }) => {
+      const limit = getProfile().limits.maxAttemptsPerJob;
+      return ok(await timed('easyapply_apply_with_answers', url, { url }, limit, async () => {
+        const r = await applyEasyApplyWithAnswers({ url, answers, dryRun });
+        if (r.result === 'applied' || r.result === 'already_applied') setStatus(url, 'applied', r.detail);
+        writeDash();
+        return r;
+      }));
+    },
+  },
 
   {
     name: 'linkedin_dm',
@@ -267,6 +307,17 @@ const TOOLS = [
     },
   },
   {
+    name: 'comment_interested',
+    description: "Comment 'Interested' (a short, profile-personalized note) on a LinkedIn hiring POST so the poster sees engagement. Pass the post URL (feed/update or /posts/). Verifies the comment landed. Use for hiring posts where you want an extra touchpoint alongside email/connect. result: commented|already_commented|no_comment_box|error.",
+    inputSchema: { type: 'object', properties: { postUrl: { type: 'string' }, role: { type: 'string' }, company: { type: 'string' }, text: { type: 'string', description: 'optional custom comment; omit to auto-generate from profile' }, dryRun: { type: 'boolean' } }, required: ['postUrl'] },
+    handler: async ({ postUrl, role, company, text, dryRun = false }) => {
+      const limit = getProfile().limits.maxAttemptsPerJob;
+      return ok(await timed('comment_interested', postUrl, { postUrl }, limit, async () => {
+        return await commentInterested({ postUrl, role, company, text, dryRun });
+      }));
+    },
+  },
+  {
     name: 'process_lead',
     description: "OPTIONAL CONVENIENCE router — you are not required to use it. Given a lead, it acts on `apply_method` (email→send_email, form→apply_portal, easy_apply→apply_linkedin_easy, dm→linkedin_dm→connect fallback) and dedups first. You OWN the decision: a lead carries `availableChannels` (all facts) + `suggestedMethod` (a hint). When you want a different channel, custom email copy, or your own ordering, call the primitive tools directly instead of this.",
     inputSchema: { type: 'object', properties: { lead: { type: 'object', description: 'a lead object from scrape_linkedin_posts' } }, required: ['lead'] },
@@ -277,7 +328,11 @@ const TOOLS = [
       if (email && alreadyEmailed(email)) return ok({ action: 'skip', reason: 'already_emailed', detail: email });
       if (alreadyApplied(company || '', role || '')) return ok({ action: 'skip', reason: 'already_applied', detail: `${company} ${role}` });
 
-      if (apply_method === 'email' && email) {
+      // Prefer the email channel whenever a usable, not-already-emailed address is present — email
+      // is the highest-priority outreach channel and must not lose out to an easy_apply/form hint.
+      const method = (email && !alreadyEmailed(email)) ? 'email' : apply_method;
+
+      if (method === 'email' && email) {
         const subj = buildSubject({ company, role }, profile);
         const text = buildBody({ company, role }, profile);
         const r = await timed('send_email', email, { email }, profile.limits.maxAttemptsPerJob, async () => {
@@ -287,19 +342,19 @@ const TOOLS = [
         });
         return ok({ action: 'email', to: email, result: r });
       }
-      if (apply_method === 'form' && formUrl) {
+      if (method === 'form' && formUrl) {
         const r = await timed('apply_portal', formUrl, { formUrl }, profile.limits.maxAttemptsPerJob, async () => {
           const res = await fillAndSubmit({ url: formUrl }); if (res.submitted) setStatus(formUrl, 'applied'); return res;
         });
         return ok({ action: 'form', url: formUrl, result: r });
       }
-      if (apply_method === 'easy_apply' && jobUrl) {
+      if (method === 'easy_apply' && jobUrl) {
         const r = await timed('apply_linkedin_easy', jobUrl, { jobUrl }, profile.limits.maxAttemptsPerJob, async () => {
           const res = await linkedinEasyApply({ url: jobUrl }); if (res.result === 'applied') setStatus(jobUrl, 'applied'); return res;
         });
         return ok({ action: 'easy_apply', url: jobUrl, result: r });
       }
-      if ((apply_method === 'dm' || apply_method === 'connect') && posterUrl) {
+      if ((method === 'dm' || method === 'connect') && posterUrl) {
         // Try DM first, fall back to connect+note
         let r = await timed('linkedin_dm', posterUrl, { posterUrl }, profile.limits.maxAttemptsPerJob, async () => linkedinDM({ profileUrl: posterUrl, role, company }));
         if (r.result === 'no_dm') {
@@ -479,36 +534,35 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 async function main() {
   await initDB();
   await initAttempts();
-  // Auto-launch the debug Chrome at boot so the agent never has to be told to.
-  try { await launchChrome(); } catch (e) { console.error('[job-agent] Chrome auto-launch:', e.message); }
+  // Connect the MCP transport FIRST so the client handshake (initialize / tools/list) succeeds
+  // immediately — Chrome launch and other boot work must never delay tool availability, or strict
+  // MCP clients (e.g. codex) time out the server startup and see NO tools.
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  // Auto-launch the debug Chrome in the BACKGROUND (not awaited) so logged-in sites become
+  // reachable without blocking the handshake. Any browser tool self-heals Chrome if it's not up.
+  Promise.resolve().then(() => launchChrome()).catch(e => console.error('[job-agent] Chrome auto-launch:', e.message));
   // Only auto-start the dashboard server at boot when explicitly requested (START_UI=1); otherwise
   // it starts lazily via ensureUI() when a UI tool is used. Prevents binding a port on every MCP load.
   if (process.env.START_UI === '1') {
     try { PORT = await startServer(); } catch (e) { console.error('[job-agent] web server failed:', e.message); }
   }
   if (PORT) process.env.JOB_AGENT_PORT = String(PORT);   // so writeDash() embeds the correct fallback port
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
   // Agent-only mode: keep self-evolution + recontribution running on a timer too (stands down
   // automatically while the always-on worker is live, so there's never double-contribution).
   try { const { startBackgroundEvolve } = await import('./src/evolve-loop.js'); startBackgroundEvolve(); } catch (e) { console.error('[job-agent] background evolve not started:', e.message); }
   // Log to stderr (stdout is the MCP channel)
   console.error(`[job-agent-mcp] ready — ${TOOLS.length} tools over stdio · UI at http://127.0.0.1:${PORT}`);
 
-  // ── Shutdown hook: when the agent disconnects / process exits, write the stop flag
-  // so the auto-started background worker (worker-forever.mjs) detects it and stops.
-  // This ensures no orphaned worker processes outlive the agent session.
-  const { DATA: DATA_DIR } = await import('./src/config.js');
-  const STOPFILE_PATH = path.join(DATA_DIR, '.stop');
-  function writeStop() {
-    try { fs.writeFileSync(STOPFILE_PATH, new Date().toISOString()); } catch {}
-    console.error('[job-agent-mcp] stop flag written — background worker will exit');
-  }
-  process.on('exit', writeStop);
-  process.on('SIGINT',  () => { writeStop(); process.exit(0); });
-  process.on('SIGTERM', () => { writeStop(); process.exit(0); });
-  // stdin closing = agent disconnected (stdio MCP transport)
-  process.stdin.on('end', () => { writeStop(); setTimeout(() => process.exit(0), 1500); });
+  // ── Clean shutdown: do NOT write data/.stop on disconnect/exit. ───────────────
+  // The detached, self-respawning worker is designed to OUTLIVE the agent session (see AGENTS.md:
+  // "never stop until the user stops you"). Writing the stop flag on exit/SIGINT/SIGTERM/stdin-end
+  // killed the background worker on every MCP disconnect — the recurring "worker stops instead of
+  // looping" bug (issues #20 / #109). Only an EXPLICIT user Stop (dashboard ⏹ / `npm run stop`)
+  // should write data/.stop. We register no stop-on-disconnect hooks; just exit cleanly.
+  process.on('SIGINT',  () => process.exit(0));
+  process.on('SIGTERM', () => process.exit(0));
+  process.stdin.on('end', () => { setTimeout(() => process.exit(0), 1500); });
 }
 
 main().catch(e => { console.error('FATAL:', e); process.exit(1); });

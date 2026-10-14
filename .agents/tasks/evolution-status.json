@@ -1,0 +1,15 @@
+{
+  "iteration": 2,
+  "timestamp": "2026-10-13T14:05:00.000Z",
+  "fixes": [
+    "connect-send-fallback",
+    "lnkd.in-redirect-wait",
+    "himalayas-apply-click",
+    "jobicy-submit",
+    "connect-submit-btn-linkedin2026-dialog",
+    "jobicy-offsite-apply-detection"
+  ],
+  "openEncounters": 20,
+  "committed": true,
+  "stats": "Iteration 2: Fixed connect #20 (x48) - LinkedIn 2026 native <dialog> Submit button (added Submit to SEND_RE, broadened inviteDlg selector, extended retry to 14x, type=submit fallback). Fixed form #6 (x8) + #87 (x3) - jobicy off-site apply detection replaces broken form-fill attempt with proper needs_manual routing. Worker running (3 node procs). 20 open encounters remaining."
+}

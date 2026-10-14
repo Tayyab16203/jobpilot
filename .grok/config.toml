@@ -1,0 +1,7 @@
+[mcp_servers.jobpilot]
+command = "node"
+args = ["mcp-server.js"]
+enabled = true
+
+[mcp_servers.jobpilot.env]
+JOBPILOT_NO_AUTOWORKER = "1"

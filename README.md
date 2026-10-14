@@ -139,7 +139,9 @@ one-click "log in here" banner, and it resumes automatically once you're back in
   logic, shows you everything it auto-answered, and escalates only the truly-unknown.
 - **A concurrent, never-stop worker** — scout · mailer · applier · connector · **evolver** run in
   parallel lanes under a supervisor that auto-restarts any lane that crashes; global crash handlers
-  + process respawn mean one bad lead or page never halts the pipeline.
+  + process respawn mean one bad lead or page never halts the pipeline. The detached worker is
+  designed to **outlive your agent session** — the MCP server does **not** write `data/.stop` when
+  the agent disconnects, so only an explicit user Stop (dashboard ⏹ / `npm run stop`) halts the loop.
 - **Self-evolution as a first-class lane** — the `evolver` runs at the same priority as applying:
   it syncs with `main` + reviews/merges open PRs every ~2 min and contributes every ~10 min.
 - **Usefulness-first PR review** — on the main repo, every open PR (any contributor, any fork, any

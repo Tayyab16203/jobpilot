@@ -67,7 +67,17 @@ export function score(text = '', title = '') {
   // Junior check: title + first 120 chars of body only — not the full description.
   const tooJunior = /\b(freshers?|0\s*[-–]\s*[12]\s*(years|yrs)|entry[- ]level|internship|interns?\b|trainee|graduate program)\b/.test(titleOnly + ' ' + t.slice(0, 120));
   const equityOnly = /\b(co-?founder|cofondat|equity[- ]only|unpaid|sweat equity|no salary)\b/.test(t.slice(0, 700));
-  const geo = GEO_LOCK.test(text.slice(0, 2500));
+  // Relocation / visa-sponsorship preference: if the user is open to relocating (profile), then
+  // "visa sponsorship" / "relocation" / a preferred region (Middle East, EU, …) is a POSITIVE
+  // signal, not a geo-lock to skip. Only treat geo as a hard skip when the role is locked to a
+  // region the user is NOT targeting AND no relocation/sponsorship is offered.
+  const prefLocs = (p.preferences?.locations || []).map(s => String(s).toLowerCase());
+  const wantsRelo = p.workAuth?.willingToRelocate === true || prefLocs.length > 0;
+  const head2500 = text.slice(0, 2500).toLowerCase();
+  const offersReloOrSponsor = /\b(visa sponsorship|sponsorship (available|provided|offered)|relocation (assistance|package|support|provided|offered)|will sponsor|we sponsor|work permit (provided|sponsored))\b/.test(head2500);
+  const inPrefRegion = prefLocs.some(loc => loc && head2500.includes(loc));
+  const geoRaw = GEO_LOCK.test(text.slice(0, 2500));
+  const geo = geoRaw && !(wantsRelo && (offersReloOrSponsor || inPrefRegion));
   const why = excluded ? `excluded company "${excluded}"` : skipHit ? `skip term "${skipHit}"` : !core ? 'title not aligned with CV target roles' : offStack ? 'off-stack title' : tooJunior ? 'junior/fresher' : equityOnly ? 'co-founder / equity-only' : geo ? 'location-restricted / authorization' : '';
   return { rel: +rel.toFixed(2), skip: !!why, why };
 }

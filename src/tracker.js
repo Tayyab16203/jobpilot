@@ -17,7 +17,37 @@ export const DONE_STATUSES = ['emailed', 'applied', 'connected', 'dm_sent', 'ski
 
 // Addresses that are never a hiring contact (aggregator footers, legal, bots).
 const BAD_EMAIL_RE = /(^|[._-])(no-?reply|donotreply|privacy|legal|abuse|security|support|help|billing|press|media|unsubscribe|notifications?|info@linkedin|gdpr|dpo|webmaster|postmaster|admin)@|@(tinyboards\.co|example\.|sentry\.|wix|.*\.png|.*\.jpg|linkedin\.com|weworkremotely\.com|remoteok\.com|remotive\.com|himalayas\.app|users\.noreply\.github\.com)|vaga-\d+@/i;
-export function isBadEmail(e = '') { return !e || BAD_EMAIL_RE.test(e) || e.length > 80; }
+// In-memory cache of the per-user learned fake-email set (populated from the fake_emails table on
+// init). Combined with the shipped code-level FAKE_EMAIL patterns so future brains skip known fakes.
+let _fakeSet = new Set();
+let _fakePatterns = null;
+function fakePatterns() {
+  if (_fakePatterns) return _fakePatterns;
+  try { // Shipped, contributable registry of known-fake/decoy address patterns (code, not data).
+    // Lazy require to avoid a hard dependency during early init.
+    _fakePatterns = require('./fake-emails.js').FAKE_EMAIL_PATTERNS || [];
+  } catch { _fakePatterns = []; }
+  return _fakePatterns;
+}
+/** True if the address is a KNOWN fake/decoy — learned (DB) or a shipped pattern. */
+export function isFakeEmail(e = '') {
+  const addr = String(e || '').toLowerCase().trim();
+  if (!addr) return false;
+  if (_fakeSet.has(addr)) return true;
+  return fakePatterns().some(re => { try { return re.test(addr); } catch { return false; } });
+}
+/** Record an address as fake so it is never contacted again (persisted + cached). Idempotent. */
+export function markFakeEmail(email, reason = '', source = '') {
+  const addr = String(email || '').toLowerCase().trim();
+  if (!addr) return false;
+  _fakeSet.add(addr);
+  try { getDB().run(`INSERT OR REPLACE INTO fake_emails (email, reason, source) VALUES (?,?,?)`, [addr, reason, source]); } catch {}
+  return true;
+}
+export function listFakeEmails() { try { return rows(`SELECT email, reason, source, ts FROM fake_emails ORDER BY ts DESC`); } catch { return []; } }
+function loadFakeSet() { try { _fakeSet = new Set(rows(`SELECT email FROM fake_emails`).map(r => String(r.email).toLowerCase())); } catch { _fakeSet = new Set(); } }
+
+export function isBadEmail(e = '') { return !e || BAD_EMAIL_RE.test(e) || e.length > 80 || isFakeEmail(e); }
 
 export async function initDB() {
   if (db) return db;
@@ -49,6 +79,10 @@ export async function initDB() {
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT DEFAULT (datetime('now')),
         profile_url TEXT UNIQUE, name TEXT, company TEXT, role TEXT, note TEXT, result TEXT
       );
+      CREATE TABLE IF NOT EXISTS fake_emails (
+        email TEXT PRIMARY KEY, ts TEXT DEFAULT (datetime('now')),
+        reason TEXT, source TEXT
+      );
     `);
     // ── Migrations: richer lead model (channel queues, freshness, relevance) ──
     const cols = new Set(rows('PRAGMA table_info(jobs)').map(c => c.name));
@@ -70,6 +104,7 @@ export async function initDB() {
     save();
     const { initEvolve } = await import('./evolve.js');
     initEvolve();
+    loadFakeSet();   // populate the learned fake-email cache so isBadEmail skips known fakes
     return db;
   })();
   return _initP;
@@ -155,6 +190,19 @@ export function setFields(url, fields) {
 }
 
 export function bumpAttempt(url) { db.run('UPDATE jobs SET attempts=COALESCE(attempts,0)+1 WHERE url=?', [url]); save(); }
+
+// One-time, idempotent revival of email leads frozen by the pre-fix transient-attempt bug:
+// status still 'new' but attempts exhausted → they'd never be re-queued under the attempts<max
+// filter. Reset attempts to 0 so the fixed mailer (which no longer burns attempts on transient
+// CDP/login failures) can act on them again. CODE-ONLY: mutates the in-memory DB via save(),
+// never hand-edits or commits data/jobs.db. Idempotent: once revived + emailed/failed, a lead
+// no longer matches status='new' AND attempts>=max.
+export function reviveStuckEmailLeads(maxAttempts = 3) {
+  const r = rows(`SELECT COUNT(*) AS n FROM jobs WHERE channel='email' AND status='new' AND COALESCE(attempts,0)>=?`, [maxAttempts]);
+  const n = (r[0] && r[0].n) || 0;
+  if (n > 0) { db.run(`UPDATE jobs SET attempts=0 WHERE channel='email' AND status='new' AND COALESCE(attempts,0)>=?`, [maxAttempts]); save(); }
+  return n;
+}
 
 // ── Dedup guards ──────────────────────────────────────────────────────────────
 /** Has this address ever been emailed (by any run / any agent)? */

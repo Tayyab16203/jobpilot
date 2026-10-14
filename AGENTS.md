@@ -12,6 +12,71 @@ are relevant, which channel per lead, what the email says, pace, when to stop �
 coarse wrappers (`find_jobs`, `scrape_fresh`) are conveniences; prefer composing primitives when
 your judgement differs. When no tool fits, `run_script` lets you author one.
 
+## 🧠 This file is the ONE guide for every brain (now and future)
+
+JobPilot is **brain-driven**: a reasoning coding-agent CLI is the brain, and it is swappable.
+Codex, Grok, Claude, Gemini — or any agent added later — all read **this file** as their standing
+instructions. There is deliberately **no per-brain instruction set**: the dispatcher
+(`scripts/brain-loop.mjs`) is brain-agnostic and simply drops whichever CLI is installed into this
+repo with a tiny prompt — *"read AGENTS.md and do your job."* Everything a brain needs to be
+powerful is here, so adding a new brain never means writing new behavior.
+
+**Architecture (brain on top, worker underneath):**
+- The **worker runs DATA-ONLY** (`WORKER_DATA_ONLY=1`): it only scrapes leads into `data/jobs.db`
+  and keeps the dashboard fresh. It never emails/applies/connects on its own.
+- The **brain** (you) performs **every** apply/email/connect by reasoning and calling the MCP
+  tools. Nothing acts without the brain. Run the whole thing with **`npm run agent`** (one
+  never-stop supervisor over the data-only worker + the always-on brain driver).
+- **Brain control is always-on and is NOT consent-gated** — like self-evolution, it is core, never
+  bypassed. The only consent that applies is `consent.autoContribute` (whether code/doc fixes get
+  pushed to GitHub). The brain can never commit `data/`, the CV, or credentials.
+- **Strictly CLIs — never API keys.** A brain runs on its own CLI login (subscription). The
+  dispatcher strips every `*_API_KEY`/`*_TOKEN` from the child env. Never add an API key anywhere.
+
+### Wire a brain (one-time, per CLI) — the only per-brain setup that exists
+
+A brain can only use tools its own MCP client config knows about, so register the JobPilot MCP
+server **once** in that CLI's config (behavior still comes from this file). The repo ships configs
+for the common ones; the pattern for any MCP-capable CLI is the same — a stdio server that runs
+`node start.js`:
+
+- **Codex** → `~/.codex/config.toml` (where its login also lives — do NOT repoint `CODEX_HOME`):
+  ```toml
+  [mcp_servers.jobpilot]
+  command = "node"
+  args = ['<repo>/start.js']
+  [mcp_servers.jobpilot.env]
+  JOBPILOT_NO_AUTOWORKER = "1"
+  ```
+- **Grok** → `grok mcp add jobpilot --scope project node -- start.js` (writes `.grok/config.toml`).
+- **Claude** → `claude mcp add jobpilot -- node start.js`.
+- **Gemini / Cursor / others** → add the same stdio server to their MCP config (`.gemini/…`,
+  `.cursor/mcp.json`, …). Always set `JOBPILOT_NO_AUTOWORKER=1` so the launched server stays a pure
+  tool server and never spawns a second worker.
+
+That is the entire per-brain step. Once wired, the brain reads this file and is fully capable.
+
+### Your job when you are the brain driving a cycle
+
+1. **Connect** to the JobPilot MCP (your CLI config above gives you the tools).
+2. **Find jobs across the WHOLE internet — not just LinkedIn.** LinkedIn posts/jobs are one source;
+   also use `web_research` / `scrape_public_source` / `scrape_fresh` (hn/reddit/boards) to search the
+   open web, company careers pages, and regional job boards. Honor the user's location preferences
+   (`profile.preferences.locations`) and relocation stance (`workAuth.willingToRelocate`): when set,
+   actively hunt **Middle East and EU** roles and **relocation / visa-sponsorship** openings — these
+   are desirable, never skip them as "geo-locked". Save discovered leads with `save_jobs`.
+3. **Act on the freshest leads** in the bank. For each, judge relevance against the profile
+   (roles, skip list, salary, work-auth), then — after `check_already_actioned` — act via the right
+   channel: email → `send_email` (CV auto-attaches); Easy Apply / LinkedIn job → `apply_linkedin_easy`;
+   external form / ATS or job-board URL → `apply_portal`; only a poster, no email/form →
+   `linkedin_connect` with a short personalized note. Record skips with `set_job_status` + a reason.
+   Email is uncapped (your Gmail, no restriction risk) — pace sensibly. Never burst Easy Apply.
+4. **Advance self-evolution once:** read `evolution_report`, take the top open encounter, open its
+   screenshot+HTML under `data/evolution/`, fix the root cause in the relevant module (you may
+   modify or create tools), verify it parses, `resolve_encounter`, then `contribute_improvements`.
+5. **Never** touch `data/`, `.env*`, `uploads/`, or credentials. **Never** re-email/re-apply/
+   re-connect (dedup via `check_already_actioned` + `data/jobs.db`).
+
 ## 🔁 Keep yourself in the loop — never stop until the user stops you
 
 **The single most important behavior: the system must keep finding, applying, and self-evolving

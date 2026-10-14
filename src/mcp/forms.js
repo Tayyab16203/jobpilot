@@ -379,6 +379,14 @@ export async function applyForm({ url, timeoutMs = 120000, submit = true, job = 
   page.setDefaultTimeout(15000);
   const unknown = new Set();
   const t0 = Date.now();
+  // Guard: these are never application-form hosts. Driving a form fill on a Gmail/accounts page or
+  // the LinkedIn feed is a mistake (it produced stale encounters like #49). Return no_form so the
+  // applier lane marks the lead 'skipped' (not 'failed') without ever navigating the page.
+  const NON_APPLY_HOST = /(^|\.)(mail\.google\.com|accounts\.google\.com)$|linkedin\.com\/feed/i;
+  if (NON_APPLY_HOST.test(url)) {
+    await page.close().catch(() => {});
+    return { ok: false, result: 'no_form', detail: 'non-application host (mail/accounts/feed)', finalUrl: url };
+  }
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await SLEEP(3500);
@@ -490,6 +498,22 @@ export async function applyForm({ url, timeoutMs = 120000, submit = true, job = 
         /\/(my-applications|dashboard|profile)/i.test(page.url()) ||
         /[?&]registered=/i.test(page.url())
       )) return { ok: true, result: 'submitted', detail: 'jobicy — application registered (confirmed via URL params)', finalUrl };
+      // Jobicy guest-apply verification gate: after submit, jobicy shows an email-OTP step
+      // (#step-verification / #code-inputs — "We sent a 6-digit code to this address") and/or a
+      // Cloudflare Turnstile CAPTCHA (#turnstile-wrapper / #jobicy-turnstile-widget). Neither can be
+      // completed automatically, so the 20 s wait would always time out and log a misleading
+      // "submitted but no confirmation" encounter (the dominant cause of encounter #6, ×8) while the
+      // lead gets re-attempted. Bail out early as needs_manual so it's routed via email/connect instead.
+      if (isJobicy && await page.evaluate(() => {
+        const vis = el => !!el && el.offsetParent !== null && !el.classList.contains('hidden-step');
+        return vis(document.querySelector('#step-verification')) ||
+               vis(document.querySelector('#code-inputs')) ||
+               vis(document.querySelector('#turnstile-wrapper')) ||
+               !!document.querySelector('#jobicy-turnstile-widget iframe');
+      }).catch(() => false)) {
+        await encounter('form', 'jobicy — email OTP / Turnstile verification gate after submit', { url: page.url(), page });
+        return { ok: false, result: 'needs_manual', detail: 'jobicy guest-apply needs email verification code + CAPTCHA — route via email/connect', finalUrl };
+      }
       if (/captcha|verify you are human/i.test(t) && i > 4) return { ok: false, result: 'needs_manual', detail: 'captcha after submit', finalUrl };
     }
     const errs = await page.locator('[role="alert"], .error, [class*="error"]').allInnerTexts().catch(() => []);

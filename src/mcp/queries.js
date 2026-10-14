@@ -24,6 +24,11 @@ export function buildQueries({ limit = 30 } = {}) {
   const isPakistan = isCountryScope && String(p.country || '').toLowerCase() === 'pakistan';
   const locationVariants = isPakistan ? [' Pakistan', ' Karachi', ' Lahore', ''] : [''];
 
+  // Preferred relocation regions (Middle East, EU, …) from the profile — when the user is open to
+  // relocation, actively surface regional + visa-sponsorship/relocation hiring, not just remote.
+  const prefLocs = (p.preferences?.locations || []).slice(0, 8);
+  const wantsRelo = p.workAuth?.willingToRelocate === true || prefLocs.length > 0;
+
   const out = new Set();
   for (const role of roles) {
     for (const loc of locationVariants) {   // all location variants per role
@@ -31,6 +36,16 @@ export function buildQueries({ limit = 30 } = {}) {
       out.add(`we are hiring ${role}${loc}${remote}`);
     }
     out.add(`looking for ${role}${remote} email your cv`);
+    // Region-targeted + relocation/visa-sponsorship phrasings (Middle East / EU preference).
+    if (wantsRelo) {
+      for (const loc of prefLocs) {
+        out.add(`hiring ${role} ${loc}`);
+        out.add(`${role} ${loc} visa sponsorship`);
+      }
+      out.add(`${role} relocation visa sponsorship`);
+      out.add(`hiring ${role} relocation Middle East`);
+      out.add(`hiring ${role} relocation Europe`);
+    }
   }
   return [...out].slice(0, limit);
 }
@@ -40,8 +55,13 @@ export function buildListingQueries({ limit = 18 } = {}) {
   const p = getProfile();
   const roles = (p.preferences?.roles || []).length ? p.preferences.roles : ['DevOps Engineer', 'Site Reliability Engineer', 'Cloud Engineer', 'Platform Engineer', 'Cloud Infrastructure Engineer', 'Cloud Solution Architect'];
   const remote = p.preferences?.remoteOnly ? ' remote' : '';
+  const prefLocs = (p.preferences?.locations || []).slice(0, 6);
+  const wantsRelo = p.workAuth?.willingToRelocate === true || prefLocs.length > 0;
   const out = new Set();
-  for (const r of roles) out.add(`${r}${remote}`);
+  for (const r of roles) {
+    out.add(`${r}${remote}`);
+    if (wantsRelo) { for (const loc of prefLocs) out.add(`${r} ${loc}`); out.add(`${r} visa sponsorship`); }
+  }
   return [...out].slice(0, limit);
 }
 

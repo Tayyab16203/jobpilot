@@ -17,12 +17,13 @@ import { liPosts, liJobs, hnHiring, publicBoards, relToIso } from './mcp/sources
 import { easyApply } from './mcp/easyapply.js';
 import { applyForm } from './mcp/forms.js';
 import { connect } from './mcp/connect.js';
+import { commentInterested } from './mcp/comment.js';
 import { sendViaGmail } from './mcp/gmail.js';
 import { subject as mkSubject, body as mkBody } from './scraper/email_content.js';
 import { writeDash } from './dashboard.js';
 import { startServer } from './server.js';
 import { getProfile, isExcludedCompany } from './profile.js';
-import { outcome, rankByUCB, learnedSkip, writePlaybook, domainOf } from './evolve.js';
+import { outcome, rankByUCB, learnedSkip, writePlaybook, domainOf, encounter } from './evolve.js';
 import { buildQueries, buildListingQueries } from './mcp/queries.js';
 import { DATA } from './config.js';
 import { assessJob, cvAttachmentForJob } from './cv.js';
@@ -36,7 +37,18 @@ const DRY = process.env.DRY === '1';
 // The evolver (self-evolution/PR) lane is independent: it stays on unless WORKER_NO_EVOLVE=1.
 const DATA_ONLY = process.env.WORKER_DATA_ONLY === '1';
 const NO_EVOLVE = process.env.WORKER_NO_EVOLVE === '1';
-const DAILY = { email: 50, easy: 80, form: 30, connect: 18 };
+// Daily caps. Email is DELIBERATELY uncapped by default (0 = unlimited): emailing through the
+// user's Gmail carries no LinkedIn-restriction risk (only Gmail's own generous throttling), and
+// the user asked for the brain to decide pace, not a hardcoded number. The user can still set a
+// ceiling from the profile (limits.maxEmailsPerDay). Easy/form/connect keep account-safety caps.
+const DAILY = { email: 0, easy: 80, form: 30, connect: 18 };
+// Resolve the email daily cap from the profile at call time: 0, null, or absent → UNLIMITED.
+// A positive number is honored as a user-chosen ceiling. Non-numeric/garbage → unlimited.
+function emailDailyCap() {
+  const v = getProfile().limits?.maxEmailsPerDay;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;   // 0 = unlimited
+}
 // Relevance floors per channel. Lowered (per user request: "don't skip stuff") so fewer
 // borderline-but-real leads get dropped before we ever look at them — we'd rather see a
 // lead and let the CV/role guards decide than silently filter it out on a fuzzy score.
@@ -142,6 +154,17 @@ const requiresWorkAuthorization = r => {
   // If the lead is anchored to a country the user IS authorized in (e.g. Pakistan), the
   // auth question is answerable — do not hard-skip. Only skip when it points elsewhere.
   if (auth.some(c => lc.includes(c))) return false;
+  // Relocation/visa-sponsorship preference: if the user is open to relocating AND the role offers
+  // sponsorship/relocation OR sits in a preferred region (Middle East / EU / …), it is DESIRABLE,
+  // not a wall — do not skip. The user explicitly wants these.
+  const prof = getProfile();
+  const prefLocs = (prof.preferences?.locations || []).map(s => String(s).toLowerCase());
+  const wantsRelo = prof.workAuth?.willingToRelocate === true || prefLocs.length > 0;
+  if (wantsRelo) {
+    const offersSponsor = /\b(visa sponsorship|sponsorship (available|provided|offered)|relocation (assistance|package|support|provided|offered)|will sponsor|we sponsor|work permit (provided|sponsored))\b/.test(lc);
+    const inPref = prefLocs.some(loc => loc && lc.includes(loc));
+    if (offersSponsor || inPref) return false;
+  }
   return true;
 };
 // Login backoff: once a site needs login, stop hammering it — surface the banner and only
@@ -254,19 +277,22 @@ async function scout() {
         if (!running()) break;
       } else { beat('scout', 'LinkedIn paused — waiting for you to log in'); }
 
-      // 2) The wider internet — HN, public boards — EVERY loop (unbiased variety,
-      //    no LinkedIn dependence, mostly email/form leads). Rotate one web source per loop
-      //    so we cover all of them quickly without hammering any single site.
-      //    Reddit is intentionally excluded (per user request): its bot-check/redirect
-      //    flow is noisy and low-yield, so we skip it entirely.
+      // 2) The wider internet — HN, public boards — run ALL of them EVERY loop (unbiased variety,
+      //    no LinkedIn dependence, mostly email/form leads). This keeps email/form leads flowing
+      //    even while LinkedIn is cooling/paused, so the email channel never starves.
+      //    Reddit is intentionally excluded by default (per user request): its bot-check/redirect
+      //    flow is noisy and low-yield. Un-starvation comes from HN/Boards getting more turns,
+      //    never from re-enabling Reddit.
       const web = [
         ['HN', () => hnHiring({ maxAgeHours: 240 })],
         ['Boards', () => publicBoards({ maxAgeHours: 72 })],
       ];
-      const [wname, wfn] = web[i % web.length];
-      beat('scout', 'web: ' + wname);
-      try { const rr = await wfn(); const { n, email } = ingest(rr.leads); say('scout', `${wname} +${n} (${email} email)`); } catch (e) { say('scout', `${wname} err ${e.message.slice(0, 60)}`); }
-      await jitter(PACE.scout);
+      for (const [wname, wfn] of web) {
+        beat('scout', 'web: ' + wname);
+        try { const rr = await wfn(); const { n, email } = ingest(rr.leads); say('scout', `${wname} +${n} (${email} email)`); } catch (e) { say('scout', `${wname} err ${e.message.slice(0, 60)}`); }
+        await jitter(PACE.scout);
+        if (!running()) break;
+      }
       if (!running()) break;
 
       // 3) LinkedIn job LISTINGS — secondary, only every OTHER loop (reduces LinkedIn load +
@@ -294,7 +320,9 @@ async function scout() {
 async function mailer() {
   while (running()) {
    try {
-    if (capLeft('email', 'email') <= 0) { beat('mailer', 'daily cap reached'); await SLEEP(10 * 60000); continue; }
+    // Email daily cap: 0/absent = UNLIMITED (default). Only enforce if the user set a positive ceiling.
+    const emailCap = emailDailyCap();
+    if (emailCap > 0 && doneToday('email') >= emailCap) { beat('mailer', `daily cap reached (${emailCap}, user-set)`); await SLEEP(10 * 60000); continue; }
     // If Gmail needs a login, don't hammer it — show the banner and wait, re-probing every ~3 min.
     if (loginBackoff('Gmail')) { beat('mailer', 'paused — waiting for you to log into Gmail'); await SLEEP(30000); continue; }
     const j = queue('email', 12).find(j => !alreadyEmailed(j.email) && !alreadyApplied(j.company, j.role));
@@ -305,11 +333,34 @@ async function mailer() {
     beat('mailer', `emailing ${j.email}`);
     // Dry runs must be observational: do not consume attempts or mark a lead as sent.
     if (DRY) { say('mailer', `DRY → ${j.email}`); await jitter(emailPaceRange()); continue; }
+    // An attempt is consumed ONLY on a genuine send attempt (see below) — never on a thrown
+    // CDP/connect error or a transient not-logged-in interstitial, which should just retry later.
+    let r;
+    try {
+      r = await sendViaGmail({ to: j.email, subject: subj, body, attachmentPath: jobCvAttachment(j, p) });
+    } catch (e) {
+      // thrown connect/unexpected error → transient: retry later, do NOT burn an attempt, no banner
+      say('mailer', `transient send error (will retry): ${((e && e.message) || e || '').toString().slice(0, 80)}`);
+      await jitter(emailPaceRange());
+      continue;
+    }
+    // transient classified failure (cdp_unavailable, or interstitial not-logged-in): retry, no attempt burn
+    if (r && r.transient) {
+      if (notLoggedIn(r.detail)) flagLogin('Gmail', 'Please log into Gmail in the JobPilot Chrome window — emailing is paused until you do');
+      say('mailer', `transient (${r.detail}) — will retry, attempt not consumed`);
+      await jitter(emailPaceRange());
+      continue;
+    }
+    // genuine send outcome → NOW consume the attempt, and re-read it so the cap arithmetic is correct.
     bumpAttempt(j.url);
-    const r = await sendViaGmail({ to: j.email, subject: subj, body, attachmentPath: jobCvAttachment(j, p) });
+    const attempts = (getJob(j.url)?.attempts) || ((j.attempts || 0) + 1);
     if (r.ok) { logEmail(j.email, j.company, j.role, subj, 'sent', j.url); setStatus(j.url, 'emailed', `sent: ${subj}`); clearLogin('Gmail'); }
-    else if (notLoggedIn(r.detail)) { flagLogin('Gmail', 'Please log into Gmail in the JobPilot Chrome window — emailing is paused until you do'); continue; }
-    else if ((j.attempts || 0) + 1 >= 3) setStatus(j.url, 'failed', r.detail);
+    else {
+      // Record an email-area encounter on a REAL send failure (page-less — gmail.js owns its page),
+      // mirroring how the applier/forms/connect lanes call the encounter recorder.
+      await encounter('email', `send failed: ${r.detail || 'unknown'}`, { url: j.url });
+      if (attempts >= (p.limits?.maxAttemptsPerJob || 3)) setStatus(j.url, 'failed', r.detail);
+    }
     log('email_send', j.company, j.role, j.email, r.ok ? 'ok' : 'fail', r.detail);
     outcome('email_domain', (j.email.split('@')[1] || ''), { win: r.ok });
     say('mailer', `${r.ok ? '✉ SENT' : '✗'} ${j.email} (${j.role} @ ${j.company})`);
@@ -466,6 +517,21 @@ async function connector() {
     else if ((j.attempts || 0) + 1 >= 3) setStatus(j.url, 'failed', r.detail);
     log('li_connect', j.company, j.role, j.poster_url, /^connected/.test(r.result) ? 'ok' : r.result === 'error' ? 'fail' : 'skip', `${r.result}: ${r.detail}`);
     say('connector', `🔗 ${r.result} → ${j.poster_name}`);
+
+    // Comment "Interested" on the hiring POST itself (extra touchpoint recruiters notice).
+    // Only for real LinkedIn feed/post URLs, once per post, and never when LinkedIn is
+    // throttling. Failure here never blocks the lead — it's a bonus engagement step.
+    const postUrl = j.url && /linkedin\.com\/(feed\/update|posts\/)/i.test(j.url) ? j.url : '';
+    if (postUrl && !needsLogin('LinkedIn') && r.result !== 'limit') {
+      try {
+        beat('connector', `💬 commenting on post → ${j.company || j.poster_name}`);
+        const c = await commentInterested({ postUrl, role: j.role, company: j.company });
+        log('li_comment', j.company, j.role, postUrl, /^(commented|already_commented)/.test(c.result) ? 'ok' : 'skip', `${c.result}: ${c.detail}`);
+        if (c.result === 'commented') { setFields(j.url, { notes: `${j.notes ? j.notes + ' · ' : ''}commented Interested on post` }); say('connector', `💬 commented Interested → ${j.company || j.poster_name}`); }
+        await extraCooldown();
+      } catch (ce) { say('connector', 'comment skipped: ' + ((ce && ce.message) || ce || '').toString().slice(0, 70)); }
+    }
+
     writeDash();
     await jitter(PACE.connector); await extraCooldown();
    } catch (e) { say('connector', 'error (skipping lead): ' + ((e && e.message) || e || '').toString().slice(0, 80)); await SLEEP(5000); }
@@ -546,6 +612,13 @@ async function evolver() {
 try { fs.rmSync(STOPFILE, { force: true }); } catch {}   // clear any stale stop flag
 try { await launchChrome(); } catch (e) { say('main', 'chrome launch issue (continuing): ' + (e.message || '').slice(0, 80)); }
 await initDB();
+// Self-heal: revive email leads frozen at the attempt cap by the pre-fix transient-attempt bug
+// (status still 'new' but attempts exhausted → never re-queued). Idempotent; code-only.
+try {
+  const { reviveStuckEmailLeads } = await import('./tracker.js');
+  const n = reviveStuckEmailLeads(getProfile().limits?.maxAttemptsPerJob || 3);
+  if (n) say('main', `revived ${n} email lead(s) stuck at the attempt cap (transient-fail self-heal)`);
+} catch {}
 // Keep the repo branch in sync with the main repo on startup (fork → rebase on upstream).
 // SKIPPED when NO_EVOLVE is set (data-only mode): the startup rebase/reset would otherwise wipe
 // local uncommitted/untracked changes — including the data-only + hook scripts — on every boot.

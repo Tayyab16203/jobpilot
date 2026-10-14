@@ -25,6 +25,7 @@ import {
   renderHeader,
   renderLoginBanners,
   renderConsentBar,
+  renderBrainLoopBar,
   renderQuestionsBanner,
 } from './partials/header.js';
 import { renderKpis, renderQueueCards } from './partials/kpis.js';
@@ -59,6 +60,16 @@ export function writeDash() {
   try { state = JSON.parse(fs.readFileSync(path.join(DATA, 'worker-state.json'), 'utf8')); } catch {}
   const hbAge = state.ts ? (Date.now() - Date.parse(state.ts)) / 1000 : 1e9;
   const live  = hbAge < 600;
+
+  // Brain-driver state (always-on reasoning driver) + which coding CLIs are installed.
+  let brainState = {};
+  try { brainState = JSON.parse(fs.readFileSync(path.join(DATA, 'brain-loop-state.json'), 'utf8')); } catch {}
+  const installedBrains = (() => {
+    const exts = process.platform === 'win32' ? ['.cmd', '.ps1', '.exe', '.bat', ''] : [''];
+    const dirs = (process.env.PATH || '').split(path.delimiter);
+    const onPath = bin => dirs.some(d => exts.some(e => { try { return d && fs.existsSync(path.join(d, bin + e)); } catch { return false; } }));
+    return ['codex', 'grok', 'claude', 'gemini'].filter(onPath);
+  })();
 
   // ── Metrics ─────────────────────────────────────────────────────────────────
   const today = {
@@ -139,6 +150,7 @@ ${renderHeader({ name: p.name, live, state, hbAge, totalJobs: tot.jobs, UIPORT }
 
   ${renderLoginBanners(state.loginNeeded)}
   ${renderConsentBar(p.consent?.autoContribute !== false)}
+  ${renderBrainLoopBar(brainState, installedBrains)}
   ${renderQuestionsBanner(pend.length)}
 
   ${renderKpis(today, tot)}
