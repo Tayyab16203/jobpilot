@@ -16,22 +16,25 @@ your judgement differs. When no tool fits, `run_script` lets you author one.
 
 JobPilot is **brain-driven**: a reasoning coding-agent CLI is the brain, and it is swappable.
 Codex, Grok, Claude, Gemini — or any agent added later — all read **this file** as their standing
-instructions. There is deliberately **no per-brain instruction set**: the dispatcher
-(`scripts/brain-loop.mjs`) is brain-agnostic and simply drops whichever CLI is installed into this
-repo with a tiny prompt — *"read AGENTS.md and do your job."* Everything a brain needs to be
-powerful is here, so adding a new brain never means writing new behavior.
+instructions. There is deliberately **no per-brain instruction set** and **no dispatcher**: each
+brain runs **independently** (started by the user or its own runtime), reads this file, and does its
+job. One brain must **never** spawn or drive another — everything a brain needs to be powerful is
+here, so adding a new brain never means writing new behavior or wiring one brain to call another.
 
 **Architecture (brain on top, worker underneath):**
 - The **worker runs DATA-ONLY** (`WORKER_DATA_ONLY=1`): it only scrapes leads into `data/jobs.db`
   and keeps the dashboard fresh. It never emails/applies/connects on its own.
 - The **brain** (you) performs **every** apply/email/connect by reasoning and calling the MCP
-  tools. Nothing acts without the brain. Run the whole thing with **`npm run agent`** (one
-  never-stop supervisor over the data-only worker + the always-on brain driver).
+  tools. Nothing acts without the brain. Run the hands with **`npm run agent`** (a never-stop
+  supervisor that respawns the DATA-ONLY worker only — no brain is spawned).
+- **One brain must NEVER spawn or drive another brain.** There is no dispatcher that launches
+  codex/grok/claude/gemini. Each brain runs **independently** — started by the user or its own
+  runtime — reads THIS file, connects to the JobPilot MCP, and drives on its own. When you are the
+  brain, you do the work yourself through the tools; you never shell out to another CLI to do it.
 - **Brain control is always-on and is NOT consent-gated** — like self-evolution, it is core, never
   bypassed. The only consent that applies is `consent.autoContribute` (whether code/doc fixes get
   pushed to GitHub). The brain can never commit `data/`, the CV, or credentials.
-- **Strictly CLIs — never API keys.** A brain runs on its own CLI login (subscription). The
-  dispatcher strips every `*_API_KEY`/`*_TOKEN` from the child env. Never add an API key anywhere.
+- **Strictly CLIs — never API keys.** A brain runs on its own CLI login. Never add an API key.
 
 ### Wire a brain (one-time, per CLI) — the only per-brain setup that exists
 
