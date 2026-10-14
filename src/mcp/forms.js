@@ -379,6 +379,14 @@ export async function applyForm({ url, timeoutMs = 120000, submit = true, job = 
   page.setDefaultTimeout(15000);
   const unknown = new Set();
   const t0 = Date.now();
+  // Guard: these are never application-form hosts. Driving a form fill on a Gmail/accounts page or
+  // the LinkedIn feed is a mistake (it produced stale encounters like #49). Return no_form so the
+  // applier lane marks the lead 'skipped' (not 'failed') without ever navigating the page.
+  const NON_APPLY_HOST = /(^|\.)(mail\.google\.com|accounts\.google\.com)$|linkedin\.com\/feed/i;
+  if (NON_APPLY_HOST.test(url)) {
+    await page.close().catch(() => {});
+    return { ok: false, result: 'no_form', detail: 'non-application host (mail/accounts/feed)', finalUrl: url };
+  }
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await SLEEP(3500);

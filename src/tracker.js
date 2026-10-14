@@ -156,6 +156,19 @@ export function setFields(url, fields) {
 
 export function bumpAttempt(url) { db.run('UPDATE jobs SET attempts=COALESCE(attempts,0)+1 WHERE url=?', [url]); save(); }
 
+// One-time, idempotent revival of email leads frozen by the pre-fix transient-attempt bug:
+// status still 'new' but attempts exhausted → they'd never be re-queued under the attempts<max
+// filter. Reset attempts to 0 so the fixed mailer (which no longer burns attempts on transient
+// CDP/login failures) can act on them again. CODE-ONLY: mutates the in-memory DB via save(),
+// never hand-edits or commits data/jobs.db. Idempotent: once revived + emailed/failed, a lead
+// no longer matches status='new' AND attempts>=max.
+export function reviveStuckEmailLeads(maxAttempts = 3) {
+  const r = rows(`SELECT COUNT(*) AS n FROM jobs WHERE channel='email' AND status='new' AND COALESCE(attempts,0)>=?`, [maxAttempts]);
+  const n = (r[0] && r[0].n) || 0;
+  if (n > 0) { db.run(`UPDATE jobs SET attempts=0 WHERE channel='email' AND status='new' AND COALESCE(attempts,0)>=?`, [maxAttempts]); save(); }
+  return n;
+}
+
 // ── Dedup guards ──────────────────────────────────────────────────────────────
 /** Has this address ever been emailed (by any run / any agent)? */
 export function alreadyEmailed(email) {

@@ -90,6 +90,8 @@ const DEFAULT_PROFILE = {
     maxAttemptsPerJob: 3,
     requestTimeoutMs: 30000,
     cooldownBetweenActionsMs: 4000,
+    // Which logged-in Gmail account tab to drive: mail/u/<N>/. 0 = first/default account.
+    gmailAccountIndex: 0,
     // Email (mailer) pacing [min,max] ms between sends. Email carries NO LinkedIn-restriction
     // risk — only Gmail throttling, which is generous — so it is deliberately brisk and is NOT
     // the heavy Easy-Apply cooldown. Tune here if Gmail ever complains.

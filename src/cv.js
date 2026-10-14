@@ -37,21 +37,29 @@ export const TARGET_ROLES = [
 
 function roleAligned(text, profile) {
   const hay = norm(text);
+  // De-spaced haystack so hashtag/glued post titles like "#AIEngineer" or "#SeniorBackendEngineer"
+  // (which norm() collapses to "aiengineer" / "seniorbackendengineer") still match a role/keyword
+  // whose spaces we also strip (e.g. "ai engineer" -> "aiengineer"). This is the #1 reason real
+  // LinkedIn-post leads were being wrongly skipped as "not aligned".
+  const glued = hay.replace(/\s+/g, '');
   const title = String(text || '').toLowerCase();
   // Only hard-skip when the title clearly matches the user's OWN skip list
   // (e.g. "sales", "intern"). Never skip on the user's target-role keywords.
   const skip = outOfScopeFromProfile(profile);
   if (skip.some(s => s && title.includes(s))) return false;
   const roles = (profile.preferences?.roles?.length ? profile.preferences.roles : TARGET_ROLES);
-  // Aligned if the title/text references any target role OR any target keyword/skill.
+  // Aligned if the title/text references any target role OR any target keyword/skill —
+  // checked both spaced (word-boundary) and glued (hashtag) forms.
   const keywordHit = [
     ...(profile.preferences?.keywords || []),
     ...(profile.skills || []),
-  ].map(norm).some(k => k && k.length > 2 && hay.includes(k));
+  ].map(norm).some(k => k && k.length > 2 && (hay.includes(k) || glued.includes(k.replace(/\s+/g, ''))));
   if (keywordHit) return true;
   return roles.some(role => {
     const key = norm(role);
-    return key && (hay.includes(key) || words(role).filter(x => x.length > 3).filter(x => hay.includes(x)).length >= 2);
+    if (!key) return false;
+    if (hay.includes(key) || glued.includes(key.replace(/\s+/g, ''))) return true;
+    return words(role).filter(x => x.length > 3).filter(x => hay.includes(x)).length >= 2;
   });
 }
 

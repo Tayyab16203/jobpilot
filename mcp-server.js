@@ -277,7 +277,11 @@ const TOOLS = [
       if (email && alreadyEmailed(email)) return ok({ action: 'skip', reason: 'already_emailed', detail: email });
       if (alreadyApplied(company || '', role || '')) return ok({ action: 'skip', reason: 'already_applied', detail: `${company} ${role}` });
 
-      if (apply_method === 'email' && email) {
+      // Prefer the email channel whenever a usable, not-already-emailed address is present — email
+      // is the highest-priority outreach channel and must not lose out to an easy_apply/form hint.
+      const method = (email && !alreadyEmailed(email)) ? 'email' : apply_method;
+
+      if (method === 'email' && email) {
         const subj = buildSubject({ company, role }, profile);
         const text = buildBody({ company, role }, profile);
         const r = await timed('send_email', email, { email }, profile.limits.maxAttemptsPerJob, async () => {
@@ -287,19 +291,19 @@ const TOOLS = [
         });
         return ok({ action: 'email', to: email, result: r });
       }
-      if (apply_method === 'form' && formUrl) {
+      if (method === 'form' && formUrl) {
         const r = await timed('apply_portal', formUrl, { formUrl }, profile.limits.maxAttemptsPerJob, async () => {
           const res = await fillAndSubmit({ url: formUrl }); if (res.submitted) setStatus(formUrl, 'applied'); return res;
         });
         return ok({ action: 'form', url: formUrl, result: r });
       }
-      if (apply_method === 'easy_apply' && jobUrl) {
+      if (method === 'easy_apply' && jobUrl) {
         const r = await timed('apply_linkedin_easy', jobUrl, { jobUrl }, profile.limits.maxAttemptsPerJob, async () => {
           const res = await linkedinEasyApply({ url: jobUrl }); if (res.result === 'applied') setStatus(jobUrl, 'applied'); return res;
         });
         return ok({ action: 'easy_apply', url: jobUrl, result: r });
       }
-      if ((apply_method === 'dm' || apply_method === 'connect') && posterUrl) {
+      if ((method === 'dm' || method === 'connect') && posterUrl) {
         // Try DM first, fall back to connect+note
         let r = await timed('linkedin_dm', posterUrl, { posterUrl }, profile.limits.maxAttemptsPerJob, async () => linkedinDM({ profileUrl: posterUrl, role, company }));
         if (r.result === 'no_dm') {
