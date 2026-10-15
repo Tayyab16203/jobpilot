@@ -124,7 +124,7 @@ export function writeDash() {
   try { learned      = q(`SELECT * FROM answers WHERE pending=0 AND answer!='' ORDER BY uses DESC, updated_at DESC LIMIT 100`); } catch {}
   try { audits       = evolutionAudits(120); } catch {}
   let cvJobs = [], answerReport = [];
-  try { cvJobs = q(`SELECT role, company, cv_match_percent, cv_drift_percent, cv_missing_terms, tailor_status FROM jobs ORDER BY id DESC LIMIT 120`); } catch {}
+  try { cvJobs = q(`SELECT role, company, cv_match_percent, cv_drift_percent, cv_missing_terms, tailor_status, selected_cv_id, selected_cv_reason FROM jobs ORDER BY id DESC LIMIT 120`); } catch {}
   try { answerReport = q(`SELECT question, answer, confidence, match_percent, confidence_basis, options FROM answers WHERE pending=2 ORDER BY updated_at DESC LIMIT 120`); } catch {}
 
   // ── Status legend ────────────────────────────────────────────────────────────

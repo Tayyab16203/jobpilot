@@ -21,7 +21,7 @@ function ans(p, key, dflt = '') {
 }
 
 /** Approximate USD exchange rates for salary conversion. */
-const FX = { usd: 1, eur: 0.92, gbp: 0.79, pkr: 280, inr: 84, aed: 3.67, cad: 1.37 };
+const FX = { usd: 1, eur: 0.92, gbp: 0.79, pkr: 280, inr: 84, aed: 3.67, sar: 3.75, qar: 3.64, cad: 1.37 };
 
 const CURRENT_SALARY_RE = /\b(current|present|existing|currently\s+(earn|make)|current\s+(pay|salary|compensation))\b|were you (making|earning|paid)|previous (role|job).*(salary|pay|making)|last drawn|present ctc/;
 
@@ -34,6 +34,8 @@ function requestedCurrency(q, fallback = 'pkr') {
   if (/£|\bgbp\b|pound/.test(q)) return 'gbp';
   if (/\binr\b|\brupees? \(india\)|indian rupee/.test(q)) return 'inr';
   if (/\baed\b|dirham/.test(q)) return 'aed';
+  if (/\bsar\b|saudi riyal/.test(q)) return 'sar';
+  if (/\bqar\b|qatari riyal/.test(q)) return 'qar';
   if (/\bcad\b|canadian/.test(q)) return 'cad';
   const named = Object.keys(FX).find(c => new RegExp(`\\b${c}\\b`).test(q));
   if (named) return named;

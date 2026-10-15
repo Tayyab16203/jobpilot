@@ -3,14 +3,28 @@
 import { createRequire } from 'module';
 import fs from 'fs';
 import { DATA, DB_FILE } from './config.js';
-import { assessJob } from './cv.js';
+import { assessJob, selectCvVariant } from './cv.js';
 import { getProfile } from './profile.js';
+import { isListedFakeEmail } from './fake-emails.js';
 
 fs.mkdirSync(DATA, { recursive: true });
 const require = createRequire(import.meta.url);
 
 let db = null;
+let SQLNS = null;
 let _initP = null;
+
+const ANSWER_FIELDS = ['qkey', 'question', 'answer', 'source', 'uses', 'wins', 'pending', 'seen', 'options', 'updated_at', 'confidence', 'match_percent', 'confidence_basis'];
+
+/** Disk row replaces memory when it was saved later, or it clears a still-pending question. */
+export function newerAnswerWins(memory, disk) {
+  if (!disk?.qkey) return false;
+  if (!memory) return true;
+  const dt = String(disk.updated_at || '');
+  const mt = String(memory.updated_at || '');
+  if (dt > mt) return true;
+  return dt === mt && Number(memory.pending) === 1 && Number(disk.pending) === 0 && String(disk.answer || '') !== '';
+}
 
 // Statuses that mean "we already reached out — never act again".
 export const DONE_STATUSES = ['emailed', 'applied', 'connected', 'dm_sent', 'skipped_duplicate'];
@@ -18,23 +32,14 @@ export const DONE_STATUSES = ['emailed', 'applied', 'connected', 'dm_sent', 'ski
 // Addresses that are never a hiring contact (aggregator footers, legal, bots).
 const BAD_EMAIL_RE = /(^|[._-])(no-?reply|donotreply|privacy|legal|abuse|security|support|help|billing|press|media|unsubscribe|notifications?|info@linkedin|gdpr|dpo|webmaster|postmaster|admin)@|@(tinyboards\.co|example\.|sentry\.|wix|.*\.png|.*\.jpg|linkedin\.com|weworkremotely\.com|remoteok\.com|remotive\.com|himalayas\.app|users\.noreply\.github\.com)|vaga-\d+@/i;
 // In-memory cache of the per-user learned fake-email set (populated from the fake_emails table on
-// init). Combined with the shipped code-level FAKE_EMAIL patterns so future brains skip known fakes.
+// init). Combined with src/fake-emails.txt so future brains skip known fakes.
 let _fakeSet = new Set();
-let _fakePatterns = null;
-function fakePatterns() {
-  if (_fakePatterns) return _fakePatterns;
-  try { // Shipped, contributable registry of known-fake/decoy address patterns (code, not data).
-    // Lazy require to avoid a hard dependency during early init.
-    _fakePatterns = require('./fake-emails.js').FAKE_EMAIL_PATTERNS || [];
-  } catch { _fakePatterns = []; }
-  return _fakePatterns;
-}
-/** True if the address is a KNOWN fake/decoy — learned (DB) or a shipped pattern. */
+/** True if the address is a KNOWN fake/decoy — learned (DB) or listed in fake-emails.txt. */
 export function isFakeEmail(e = '') {
   const addr = String(e || '').toLowerCase().trim();
   if (!addr) return false;
   if (_fakeSet.has(addr)) return true;
-  return fakePatterns().some(re => { try { return re.test(addr); } catch { return false; } });
+  return isListedFakeEmail(addr);
 }
 /** Record an address as fake so it is never contacted again (persisted + cached). Idempotent. */
 export function markFakeEmail(email, reason = '', source = '') {
@@ -53,8 +58,9 @@ export async function initDB() {
   if (db) return db;
   if (_initP) return _initP;
   _initP = (async () => {
-    const SQL = await require('sql.js')();
-    db = fs.existsSync(DB_FILE) ? new SQL.Database(fs.readFileSync(DB_FILE)) : new SQL.Database();
+    SQLNS = await require('sql.js')();
+    db = fs.existsSync(DB_FILE) ? new SQLNS.Database(fs.readFileSync(DB_FILE)) : new SQLNS.Database();
+    try { _lastSaveMs = fs.existsSync(DB_FILE) ? fs.statSync(DB_FILE).mtimeMs : Date.now(); } catch { _lastSaveMs = Date.now(); }
     db.run(`
       CREATE TABLE IF NOT EXISTS jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT, added_at TEXT DEFAULT (datetime('now')),
@@ -101,6 +107,9 @@ export async function initDB() {
     add('cv_missing_terms', "TEXT DEFAULT ''");
     add('tailor_status', "TEXT DEFAULT 'not_requested'");
     add('tailored_cv_path', "TEXT DEFAULT ''");
+    add('selected_cv_id', "TEXT DEFAULT 'main'");
+    add('selected_cv_path', "TEXT DEFAULT ''");
+    add('selected_cv_reason', "TEXT DEFAULT ''");
     save();
     const { initEvolve } = await import('./evolve.js');
     initEvolve();
@@ -112,7 +121,42 @@ export async function initDB() {
 
 export function getDB() { if (!db) throw new Error('initDB() not called'); return db; }
 let _lastSaveMs = 0;
-export function save() { fs.writeFileSync(DB_FILE, Buffer.from(db.export())); _lastSaveMs = Date.now(); }
+
+function readRows(database, sql, p = []) {
+  const s = database.prepare(sql); s.bind(p);
+  const out = []; while (s.step()) out.push(s.getAsObject()); s.free();
+  return out;
+}
+
+// The dashboard and the worker each hold a full copy of jobs.db. A later save used to
+// export the stale copy and wipe an answer the user had just typed. Pull newer answer
+// rows off disk before writing so a question update sticks.
+function absorbNewerAnswers() {
+  if (!SQLNS || !db || !fs.existsSync(DB_FILE)) return;
+  let mtime = 0;
+  try { mtime = fs.statSync(DB_FILE).mtimeMs; } catch { return; }
+  if (!(mtime > _lastSaveMs + 50)) return;
+  let disk = null;
+  try {
+    disk = new SQLNS.Database(fs.readFileSync(DB_FILE));
+    const mem = new Map(readRows(db, 'SELECT * FROM answers').map(r => [r.qkey, r]));
+    for (const row of readRows(disk, 'SELECT * FROM answers')) {
+      if (!newerAnswerWins(mem.get(row.qkey), row)) continue;
+      const vals = ANSWER_FIELDS.map(f => row[f] ?? null);
+      db.run(
+        `INSERT INTO answers (${ANSWER_FIELDS.join(',')}) VALUES (${ANSWER_FIELDS.map(() => '?').join(',')})
+         ON CONFLICT(qkey) DO UPDATE SET ${ANSWER_FIELDS.filter(f => f !== 'qkey').map(f => `${f}=excluded.${f}`).join(', ')}`,
+        vals);
+    }
+  } catch { /* disk copy unreadable — keep this process's answers */ }
+  finally { try { disk?.close(); } catch {} }
+}
+
+export function save() {
+  absorbNewerAnswers();
+  fs.writeFileSync(DB_FILE, Buffer.from(db.export()));
+  _lastSaveMs = Date.now();
+}
 /** Another process (the worker) may have written the DB file — reload it read-side. */
 export async function reloadIfChanged() {
   if (!db) return initDB();
@@ -126,11 +170,7 @@ export async function reloadIfChanged() {
   } catch {}
   return db;
 }
-export function rows(sql, p = []) {
-  const s = db.prepare(sql); s.bind(p);
-  const out = []; while (s.step()) out.push(s.getAsObject()); s.free();
-  return out;
-}
+export function rows(sql, p = []) { return readRows(db, sql, p); }
 export function one(sql, p = []) { return rows(sql, p)[0] ?? null; }
 const nowIso = () => new Date().toISOString();
 
@@ -141,18 +181,21 @@ export function upsertJobs(list) {
   for (const j of list) {
     if (!j.url) continue;
     const assessment = assessJob(j, getProfile());
+    const selection = selectCvVariant(j, getProfile());
     const email = j.email && !isBadEmail(j.email) ? j.email.toLowerCase() : '';
     db.run(
       `INSERT OR IGNORE INTO jobs (source,company,role,remote,location,salary,url,email,portal,status,
          channel,apply_url,poster_url,poster_name,posted_at,relevance,description,updated_at,
-         cv_match_percent,cv_drift_percent,cv_missing_terms,tailor_status)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         cv_match_percent,cv_drift_percent,cv_missing_terms,tailor_status,
+         selected_cv_id,selected_cv_path,selected_cv_reason)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [j.source || '', j.company || '', j.role || '', j.remote ? 1 : 0, j.location || '', j.salary || '', j.url,
        email, j.portal || 'other', j.status || 'new', j.channel || '', j.applyUrl || j.apply_url || '',
        j.posterUrl || j.poster_url || '', j.posterName || j.poster_name || '', j.postedAt || j.posted_at || '',
        +j.relevance || 0, (j.description || j.postText || '').slice(0, 2000), nowIso(),
        assessment.matchPercent, assessment.driftPercent, assessment.missingTerms.join(', '),
-       assessment.tailoredEligible ? 'approval_required' : 'not_requested']
+       assessment.tailoredEligible ? 'approval_required' : 'not_requested',
+       selection.id, selection.path, selection.reason]
     );
     if (db.getRowsModified() > 0) { n++; continue; }
     db.run(
@@ -162,10 +205,12 @@ export function upsertJobs(list) {
          poster_url = CASE WHEN poster_url='' OR poster_url IS NULL THEN ? ELSE poster_url END,
          posted_at = CASE WHEN posted_at='' OR posted_at IS NULL THEN ? ELSE posted_at END,
          cv_match_percent=?, cv_drift_percent=?, cv_missing_terms=?,
-         tailor_status=CASE WHEN tailor_status='generated' THEN tailor_status ELSE ? END
+         tailor_status=CASE WHEN tailor_status='generated' THEN tailor_status ELSE ? END,
+         selected_cv_id=?, selected_cv_path=?, selected_cv_reason=?
        WHERE url=?`,
       [email, j.applyUrl || '', j.posterUrl || '', j.postedAt || '', assessment.matchPercent,
-       assessment.driftPercent, assessment.missingTerms.join(', '), assessment.tailoredEligible ? 'approval_required' : 'not_requested', j.url]);
+       assessment.driftPercent, assessment.missingTerms.join(', '), assessment.tailoredEligible ? 'approval_required' : 'not_requested',
+       selection.id, selection.path, selection.reason, j.url]);
   }
   save();
   return n;

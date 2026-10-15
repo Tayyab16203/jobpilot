@@ -8,9 +8,24 @@ import { getProfile } from '../profile.js';
 import { textAnswer, choiceAnswer, coverText } from './answers.js';
 import { encounter, askLater, learn } from '../evolve.js';
 import fs from 'fs';
-import { cvAttachmentForJob } from '../cv.js';
+import { cvAttachmentForJob, selectCvVariant } from '../cv.js';
+import { setFields } from '../tracker.js';
 
 const SLEEP = ms => new Promise(r => setTimeout(r, ms));
+
+// intl-tel-input leaves its country list open (role=dialog) after a phone fill, and cookie
+// bars sit on the submit button. Either one swallows the click, so the form never confirms.
+async function closeBlockingOverlays(page) {
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.evaluate(() => {
+    document.querySelectorAll('.iti__country-selector, .iti--container').forEach(el => el.classList.add('iti__hide'));
+    const ae = document.activeElement;
+    if (ae && ae !== document.body) ae.blur();
+  }).catch(() => {});
+  const cookie = page.getByRole('button', { name: /^(accept all|decline all|accept cookies|allow all cookies|allow all|reject all|i agree|got it)$/i }).first();
+  if (await cookie.isVisible().catch(() => false)) await cookie.click({ timeout: 2000 }).catch(() => {});
+  await SLEEP(300);
+}
 const CONFIRM_RE = /thank(s| you) for (applying|your (application|interest))|application (has been |was )?(received|submitted|sent)|we.?ve received your application|successfully (applied|submitted)|your application is (complete|submitted|received)|application submitted|applied successfully|you('ve| have) applied|congrat|we will be in touch|we.?ll be in touch|check your email.*application/i;
 
 const SCAN = () => {
@@ -321,6 +336,8 @@ async function followRedirect(page, startHost) {
 
 async function fillAll(page, unknown, job = {}) {
   const p = getProfile();
+  const selection = selectCvVariant(job, p);
+  if (job.url) setFields(job.url, { selected_cv_id: selection.id, selected_cv_path: selection.path, selected_cv_reason: selection.reason });
   const cvPath = cvAttachmentForJob(job, p);
   const fields = await page.evaluate(SCAN);
   const radios = {};
@@ -361,6 +378,7 @@ async function fillAll(page, unknown, job = {}) {
       if ((v == null || v === '') && f.tag === 'TEXTAREA') v = coverText(p);
       if (v == null || v === '') { if (f.required) unknown.add(f.q); continue; }
       await loc.fill(String(v));
+      if (/phone|mobile/i.test(f.q)) await page.keyboard.press('Escape').catch(() => {});
       if (/location|city/i.test(f.q)) { await SLEEP(1200); const o = page.locator('[role="option"], .pac-item').first(); if (await o.isVisible().catch(() => false)) await o.click().catch(() => {}); }
     } catch {}
   }
@@ -451,6 +469,8 @@ export async function applyForm({ url, timeoutMs = 120000, submit = true, job = 
     if (missing.length) { missing.forEach(q => askLater(q)); return { ok: false, result: 'needs_manual', detail: 'unknown required: ' + missing.slice(0, 4).join(' | ').slice(0, 300), questions: missing, finalUrl }; }
     if (!submit) return { ok: true, result: 'dry_run_ready', detail: `filled ${n} fields`, finalUrl };
 
+    await closeBlockingOverlays(page);
+
     // Prefer an explicit submit control (Workable's `[data-ui="apply-button"]`, Greenhouse/Lever
     // `button[type=submit]`) before falling back to the generic accessible-name match. The
     // submit button usually sits at the very bottom of a long form, so it can be below the fold
@@ -458,26 +478,29 @@ export async function applyForm({ url, timeoutMs = 120000, submit = true, job = 
     // click fallbacks instead of a single click() that hangs until the actionability timeout.
     // For jobicy.com, use a wider selector set with a longer timeout.
     const isJobicy = /jobicy\.com/.test(hostOf(page.url()));
+    // Lever's real control is `<button id="btn-submit" type="button" class="template-btn-submit">`.
+    // The page also has a hidden `<button id="hcaptchaSubmitBtn" type="submit" class="hidden">`.
+    // Matching `button[type=submit]` first clicks that decoy (or treats it as "no submit button"
+    // because it is hidden and disabled) and never reaches Submit application.
     const btn = isJobicy
       ? page.locator(
           'button[type="submit"], input[type="submit"], .apply-btn, #apply-button, a.apply-button'
         ).first()
           .or(page.locator('button').filter({ hasText: /submit|apply/i }).first())
         : page.locator(
-          'button[data-ui="apply-button"], [data-ui="submit"], button[type="submit"]:not([aria-disabled="true"]), input[type="submit"]'
+          '#btn-submit, button.template-btn-submit, button[data-qa="btn-submit"], button[data-ui="apply-button"], [data-ui="submit"]'
         ).first()
+          .or(page.locator('button[type="submit"]:not(#hcaptchaSubmitBtn):not(.hidden), input[type="submit"]').first())
           .or(page.getByRole('button', { name: /submit application|submit|send application|apply now|complete application|^apply$/i }).last())
-          .or(page.locator('a[role="button"]').filter({ hasText: /submit|apply now/i }).first());
+          .or(page.locator('a[role="button"], a.postings-btn').filter({ hasText: /submit application|apply now/i }).first());
     const btnTimeout = isJobicy ? 8000 : 5000;
-    // Try to find the button even if it's currently not visible (off-screen / in sticky footer).
-    let btnExists = (await btn.count().catch(() => 0)) > 0;
-    if (!btnExists) {
-      // Last resort: any button at the bottom of the page whose text looks like submit.
-      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
-      await SLEEP(800);
-      btnExists = (await btn.count().catch(() => 0)) > 0;
-    }
-    if (!btnExists || !(await btn.isVisible().catch(() => false)) && !(await btn.isEnabled().catch(() => false))) {
+    // The submit control sits at the bottom of a long form. Scroll before the visibility check
+    // so a below-the-fold button is not reported as missing.
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+    await SLEEP(400);
+    const btnExists = (await btn.count().catch(() => 0)) > 0;
+    const btnVisible = btnExists && await btn.isVisible().catch(() => false);
+    if (!btnExists || !btnVisible) {
       await encounter('form', 'form filled but no submit button on ' + hostOf(finalUrl), { url: finalUrl, page });
       return { ok: false, result: 'needs_manual', detail: 'no submit button', finalUrl };
     }

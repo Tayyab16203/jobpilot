@@ -16,6 +16,69 @@ const TECH_TERMS = 'aws azure gcp kubernetes terraform docker linux jenkins gith
 // listed ai/backend/developer/full-stack here, which hard-skipped the user's own target
 // roles. The out-of-scope filter must come from the profile's `skip` preferences.
 const DEFAULT_SKIP = ['sales', 'intern', 'data entry', 'manual testing', 'recruiter', 'hr '];
+const CV_FOCUS_RULES = {
+  aws: ['aws', 'amazon web services', 'ec2', 'eks', 's3', 'lambda', 'cloudformation', 'fargate', 'iam'],
+  azure: ['azure', 'azure devops', 'aks', 'entra', 'app service', 'bicep'],
+  gcp: ['gcp', 'google cloud', 'gke', 'cloud run', 'bigquery', 'pub sub', 'compute engine'],
+  sre: ['sre', 'site reliability', 'reliability engineering', 'observability', 'incident response', 'sli', 'slo', 'error budget'],
+  dataops: ['dataops', 'data ops', 'data pipeline', 'etl', 'airflow', 'dbt', 'spark', 'snowflake'],
+  mlops: ['mlops', 'ml ops', 'machine learning operations', 'model deployment', 'model serving', 'kubeflow', 'mlflow'],
+};
+
+function textHas(text, term) {
+  const hay = norm(text); const needle = norm(term);
+  return Boolean(needle && (hay.includes(needle) || hay.replace(/\s+/g, '').includes(needle.replace(/\s+/g, ''))));
+}
+
+function jobCvText(job = {}) {
+  return [job.role, job.title, job.description, job.postText, job.location, job.salary, job.notes]
+    .filter(Boolean).join(' ');
+}
+
+function configuredCvVariants(profile = {}) {
+  const configured = Array.isArray(profile.preferences?.cvVariants) ? profile.preferences.cvVariants : [];
+  const out = configured.filter(v => v && v.path && fs.existsSync(v.path)).map((v, i) => ({
+    id: String(v.id || `cv-${i + 1}`),
+    label: String(v.label || v.id || path.basename(v.path)),
+    path: v.path,
+    focuses: (Array.isArray(v.focuses) ? v.focuses : []).map(x => norm(x)),
+    keywords: (Array.isArray(v.keywords) ? v.keywords : []).map(x => String(x)),
+  }));
+  if (profile.cvPath && fs.existsSync(profile.cvPath) && !out.some(v => v.path === profile.cvPath)) {
+    out.push({ id: 'main', label: 'Main CV', path: profile.cvPath, focuses: ['general'], keywords: [] });
+  }
+  return out;
+}
+
+/** Choose the most relevant user-provided CV variant from the job title and requirements. */
+export function selectCvVariant(job = {}, profile = {}) {
+  const variants = configuredCvVariants(profile);
+  if (!variants.length) return { id: 'main', label: 'Main CV', path: profile.cvPath || '', matchedTerms: [], reason: 'configured main CV fallback' };
+  const raw = jobCvText(job);
+  const title = [job.role, job.title].filter(Boolean).join(' ');
+  const scored = variants.map((v, order) => {
+    let score = v.focuses.includes('general') || v.id === 'main' ? 1 : 0;
+    const matchedTerms = [];
+    for (const [focus, terms] of Object.entries(CV_FOCUS_RULES)) {
+      const titleHits = terms.filter(t => textHas(title, t));
+      const bodyHits = terms.filter(t => !titleHits.includes(t) && textHas(raw, t));
+      if (!titleHits.length && !bodyHits.length) continue;
+      const matchesFocus = v.focuses.includes(focus) || v.id.toLowerCase() === focus || norm(v.label).includes(focus);
+      if (matchesFocus) {
+        score += titleHits.length * 120 + bodyHits.length * 20;
+        matchedTerms.push(...titleHits, ...bodyHits);
+      }
+    }
+    for (const keyword of v.keywords) if (textHas(raw, keyword)) { score += 4; matchedTerms.push(keyword); }
+    return { ...v, score, order, matchedTerms: [...new Set(matchedTerms)] };
+  }).sort((a, b) => b.score - a.score || a.order - b.order);
+  const winner = scored[0];
+  const reason = winner.matchedTerms.length
+    ? `matched ${winner.matchedTerms.slice(0, 6).join(', ')}`
+    : 'no specialist signal; using general CV';
+  return { id: winner.id, label: winner.label, path: winner.path, matchedTerms: winner.matchedTerms, reason };
+}
+
 function outOfScopeFromProfile(profile) {
   const skip = (profile?.preferences?.skip?.length ? profile.preferences.skip : DEFAULT_SKIP)
     .map(s => String(s).trim().toLowerCase()).filter(Boolean);
@@ -138,7 +201,8 @@ function onePagePdf(lines) {
 /** Generate a draft tailored PDF only after explicit user approval. */
 export function ensureTailoredCv(job = {}, profile = {}) {
   const assessment = assessJob(job, profile);
-  if (profile.preferences?.allowTailoredCv !== true || !assessment.tailoredEligible) return { path: profile.cvPath || '', generated: false, assessment };
+  const selection = selectCvVariant(job, profile);
+  if (profile.preferences?.allowTailoredCv !== true || !assessment.tailoredEligible) return { path: selection.path || profile.cvPath || '', generated: false, assessment, selection };
   const dir = path.join(DATA, 'tailored-cv');
   fs.mkdirSync(dir, { recursive: true });
   const key = crypto.createHash('sha1').update(`${job.url || ''}|${profile.cvPath || ''}|${assessment.matchPercent}`).digest('hex').slice(0, 16);
@@ -166,11 +230,13 @@ export function ensureTailoredCv(job = {}, profile = {}) {
     ].filter((x, i, a) => x !== '' || (i && a[i - 1] !== '')).map(String);
     fs.writeFileSync(out, onePagePdf(lines));
   }
-  return { path: out, generated: true, assessment };
+  return { path: out, generated: true, assessment, selection };
 }
 
-/** Return the approved per-job attachment, otherwise the canonical CV. */
+/** Return the approved tailored draft for general jobs, or the best matching user CV variant. */
 export function cvAttachmentForJob(job = {}, profile = {}) {
+  const selection = selectCvVariant(job, profile);
+  if (selection.id !== 'main' && selection.path && fs.existsSync(selection.path)) return selection.path;
   const result = ensureTailoredCv(job, profile);
   return result.path && fs.existsSync(result.path) ? result.path : profile.cvPath || '';
 }

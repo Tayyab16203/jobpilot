@@ -1,0 +1,66 @@
+# Known-fake hiring addresses. One address per line.
+# Blank lines and lines starting with # are ignored.
+# A line that starts with @ blocks every address at that domain (@example.com).
+# Matching is case-insensitive. Add an address here when a brain confirms it is a decoy.
+# Do not put patterns in JavaScript — this file is the registry.
+
+# 2026-10: user-reported fake "large Saudi companies HR" dump. Exact addresses only.
+cv@arabianfal.com
+cv@aldawaa.com.sa
+hr.qrm@hotmail.com
+rec@alojaimi.com
+recruitment@rawabiholding.com
+job.s6@hotmail.com
+careers@dnata.com
+hr@alesayi_motors.com
+hr@alarayan.com
+recruiting.ksa@mcmermott.com
+recruitment@aytb.com
+wadaef@gtecorp.com
+careers@nesr.com
+recruit@farm.com.sa
+info@alhumamlaw.com
+hr1@gulfteksaudi.com
+catcosa@catcosa.com
+cv@tafear.com
+recruitment@sraco.com.sa
+info@atco.com.sa
+hrdepartmental@sa.yokogawa.com
+recruitment@shadeco.com
+klc.hr@alkafaa.com
+kbr-amcdehr@kbr.com
+recruitment@batook.com
+career@shawarmer.com
+hrsupport@archirodon.net
+jobs@binajinah.com
+marketing.np@nesma.com
+wadaef2019@abdulla-fouad.com
+careers@innosoft.sa
+m@startime.com.sa
+job@musk.sa.com
+shababwatansa@gmail.com
+j@sabksa.com
+al.alshaikh@bonyan.sa
+ymohammed@innovest.com.sa
+s.alwadi@nhc.sa
+i.atassi@artar.com.sa
+oalkhunaizi@darwaemaar.com
+jobs@almasah.net
+recruitment.amjad@gmail.com
+jobrydlaw@gmail.com
+job@almoosahospital.com.sa
+recruitment@almoosahospital.com.sa
+jobs@sghgroup.net
+career.dmm@sghgroup.net
+talent.acquisition@drsulaimanalhabib.com
+careers@jhah.com
+hrd@alahsahospital.com.sa
+career@almanahospital.com.sa
+info@familycare.com.sa
+info@ramclinics.com
+hr.dsfhr@fakeeh.care
+career@mouwasat.com
+careers@dallah-hospital.com
+hr.phc@drsulaimanalhabib.com
+careers@almurjanhospital.com
+hiringnow.ksa@gmail.com

@@ -40,13 +40,16 @@ jobs:
       - name: Security gate
         run: node scripts/ci-security-scan.mjs
 
-      # 2) Syntax-check every changed JS/MJS file.
+      # 2) Syntax-check every changed JS/MJS file that still EXISTS (skip deletions/renames).
       - name: Syntax check changed JS
         run: |
-          git fetch origin "${{ github.base_ref || 'main' }}" --depth=1
-          files=$(git diff --name-only "origin/${{ github.base_ref || 'main' }}...HEAD" | grep -E '\.m?js$' || true)
+          git fetch origin "${{ github.base_ref || 'main' }}"
+          base="origin/${{ github.base_ref || 'main' }}"
+          # --diff-filter=d excludes deleted files; checkout is full (fetch-depth: 0) so the
+          # merge-base is correct. Only check files present in the working tree.
+          files=$(git diff --name-only --diff-filter=d "$base...HEAD" -- '*.js' '*.mjs' || true)
           for f in $files; do
-            [ -f "$f" ] && echo "checking $f" && node --check "$f"
+            if [ -f "$f" ]; then echo "checking $f"; node --check "$f"; fi
           done
 
       # 3) Server must still boot (imports resolve, tools register).

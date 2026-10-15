@@ -60,7 +60,17 @@ export function score(text = '', title = '') {
     ? (p.preferences?.skip || []).find(s => new RegExp(`\\b${s}\\b`, 'i').test(titleOnly))
     : null; // no clean title → never skip based on description content
   const terms = new Set([...(p.skills || []), ...(p.preferences?.keywords || [])].map(s => s.toLowerCase()));
-  const core = CV_TITLE.test(head) && !NON_CV_TITLE.test(head);
+  // A configured target role (Backend Engineer, AI Engineer, …) is aligned. The old rule
+  // required a DevOps-only title and treated "software engineer" / "AI" as not-the-CV,
+  // so those emails were skipped before anyone could send them.
+  const headGlued = head.replace(/[^a-z0-9]+/g, '');
+  const roleHit = (p.preferences?.roles || []).some(role => {
+    const key = String(role || '').toLowerCase().trim();
+    if (key.length < 3) return false;
+    const glued = key.replace(/[^a-z0-9]+/g, '');
+    return head.includes(key) || (glued.length > 3 && headGlued.includes(glued));
+  });
+  const core = roleHit || (CV_TITLE.test(head) && !NON_CV_TITLE.test(head));
   const offStack = OFF_STACK.test(head) && !/\b(python|ai|ml|llm|fastapi|django)\b/.test(head);
   let hit = 0; for (const s of terms) if (t.includes(s)) hit++;
   const rel = Math.min(1, (core ? 0.45 : 0) + 0.55 * Math.min(1, hit / 6));

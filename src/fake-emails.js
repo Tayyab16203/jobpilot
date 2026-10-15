@@ -1,82 +1,60 @@
-// src/fake-emails.js — SELF-EVOLVING registry of KNOWN-FAKE / decoy hiring emails.
-//
-// Why this exists: some lists circulating online (e.g. mass "Saudi company HR email" dumps) are
-// FAKE — the addresses don't belong to real hiring contacts, bounce, or are honeypots. Emailing
-// them wastes sends and can hurt the sender's Gmail reputation. This file is the SHIPPED, code-level
-// memory so EVERY future brain recognizes them and never contacts them again — it is contributed
-// back to the repo (unlike the per-user data/jobs.db fake_emails table, which stays local).
-//
-// How it works:
-//   • tracker.isBadEmail() consults FAKE_EMAIL_PATTERNS (here) AND the per-user fake_emails table.
-//   • A brain that discovers a fake address should: (1) tracker.markFakeEmail(addr, reason) for the
-//     local DB, and (2) add a durable pattern HERE and contribute_improvements so the whole fleet
-//     learns it. Prefer a precise literal/domain pattern over anything broad.
-//
-// Each entry is a RegExp tested against the lowercased address.
+// src/fake-emails.js — loads the known-fake address list from fake-emails.txt.
+// The list is a plain file so a brain can add an address without writing a regex.
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-export const FAKE_EMAIL_PATTERNS = [
-  // ── 2026-10: a widely-shared "large Saudi companies HR email" list flagged by the user as fake.
-  //    Scoped to the EXACT addresses from that dump so we never nuke a legitimate address at these
-  //    domains later. (reason: user-reported fake decoy list; do not contact.)
-  /^cv@arabianfal\.com$/i,
-  /^cv@aldawaa\.com\.sa$/i,
-  /^hr\.qrm@hotmail\.com$/i,
-  /^rec@alojaimi\.com$/i,
-  /^recruitment@rawabiholding\.com$/i,
-  /^job\.s6@hotmail\.com$/i,
-  /^careers@dnata\.com$/i,
-  /^hr@alesayi_motors\.com$/i,
-  /^hr@alarayan\.com$/i,
-  /^recruiting\.ksa@mcmermott\.com$/i,
-  /^recruitment@aytb\.com$/i,
-  /^wadaef@gtecorp\.com$/i,
-  /^careers@nesr\.com$/i,
-  /^recruit@farm\.com\.sa$/i,
-  /^info@alhumamlaw\.com$/i,
-  /^hr1@gulfteksaudi\.com$/i,
-  /^catcosa@catcosa\.com$/i,
-  /^cv@tafear\.com$/i,
-  /^recruitment@sraco\.com\.sa$/i,
-  /^info@atco\.com\.sa$/i,
-  /^hrdepartmental@sa\.yokogawa\.com$/i,
-  /^recruitment@shadeco\.com$/i,
-  /^klc\.hr@alkafaa\.com$/i,
-  /^kbr-amcdehr@kbr\.com$/i,
-  /^recruitment@batook\.com$/i,
-  /^career@shawarmer\.com$/i,
-  /^hrsupport@archirodon\.net$/i,
-  /^jobs@binajinah\.com$/i,
-  /^marketing\.np@nesma\.com$/i,
-  /^wadaef2019@abdulla-fouad\.com$/i,
-  /^careers@innosoft\.sa$/i,
-  /^m@startime\.com\.sa$/i,
-  /^job@musk\.sa\.com$/i,
-  /^shababwatansa@gmail\.com$/i,
-  /^j@sabksa\.com$/i,
-  /^al\.alshaikh@bonyan\.sa$/i,
-  /^ymohammed@innovest\.com\.sa$/i,
-  /^s\.alwadi@nhc\.sa$/i,
-  /^i\.atassi@artar\.com\.sa$/i,
-  /^oalkhunaizi@darwaemaar\.com$/i,
-  /^jobs@almasah\.net$/i,
-  /^recruitment\.amjad@gmail\.com$/i,
-  /^jobrydlaw@gmail\.com$/i,
-  /^job@almoosahospital\.com\.sa$/i,
-  /^recruitment@almoosahospital\.com\.sa$/i,
-  /^jobs@sghgroup\.net$/i,
-  /^career\.dmm@sghgroup\.net$/i,
-  /^talent\.acquisition@drsulaimanalhabib\.com$/i,
-  /^careers@jhah\.com$/i,
-  /^hrd@alahsahospital\.com\.sa$/i,
-  /^career@almanahospital\.com\.sa$/i,
-  /^info@familycare\.com\.sa$/i,
-  /^info@ramclinics\.com$/i,
-  /^hr\.dsfhr@fakeeh\.care$/i,
-  /^career@mouwasat\.com$/i,
-  /^careers@dallah-hospital\.com$/i,
-  /^hr\.phc@drsulaimanalhabib\.com$/i,
-  /^careers@almurjanhospital\.com$/i,
-  /^hiringnow\.ksa@gmail\.com$/i,
-];
+const FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fake-emails.txt');
 
-export default FAKE_EMAIL_PATTERNS;
+export function parseFakeEmailList(text = '') {
+  const emails = new Set();
+  const domains = new Set();
+  for (const raw of String(text).split(/\r?\n/)) {
+    const line = raw.trim().toLowerCase();
+    if (!line || line.startsWith('#')) continue;
+    if (line.startsWith('@')) {
+      const domain = line.slice(1).replace(/^@+/, '');
+      if (domain) domains.add(domain);
+      continue;
+    }
+    emails.add(line);
+  }
+  return { emails, domains };
+}
+
+export function loadFakeEmailList(file = FILE) {
+  try {
+    return parseFakeEmailList(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return { emails: new Set(), domains: new Set() };
+  }
+}
+
+let cached = null;
+let cachedMtime = 0;
+
+function list() {
+  try {
+    const mtime = fs.statSync(FILE).mtimeMs;
+    if (!cached || mtime !== cachedMtime) {
+      cached = loadFakeEmailList(FILE);
+      cachedMtime = mtime;
+    }
+  } catch {
+    cached = { emails: new Set(), domains: new Set() };
+  }
+  return cached;
+}
+
+/** True when the address is in fake-emails.txt (exact address, or a @domain line). */
+export function isListedFakeEmail(addr = '') {
+  const a = String(addr || '').toLowerCase().trim();
+  if (!a) return false;
+  const { emails, domains } = list();
+  if (emails.has(a)) return true;
+  const at = a.lastIndexOf('@');
+  if (at < 0) return false;
+  return domains.has(a.slice(at + 1));
+}
+
+export const FAKE_EMAIL_FILE = FILE;

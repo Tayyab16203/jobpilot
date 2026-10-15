@@ -22,6 +22,8 @@ check('Pakistan returns a range', salaryFor('What is your expected monthly salar
 check('worldwide USD expectation is selected', salaryFor('What is your expected salary in USD per month?', profile), '5000');
 check('annual conversion preserves the range', salaryFor('What is your expected annual salary in Pakistan?', profile), '7200000-9600000');
 check('numeric fields use the lower bound', salaryFor('Expected salary PKR', profile, true), '600000');
+check('SAR current salary converts from PKR', salaryFor('What is your current monthly salary in SAR?', profile), '6700');
+check('SAR expected salary converts the PKR range', salaryFor('What is your expected monthly salary in SAR?', profile), '8000-10700');
 
 console.log(fail === 0 ? '\nALL PASS' : `\n${fail} FAILED`);
 process.exit(fail === 0 ? 0 : 1);

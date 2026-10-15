@@ -12,6 +12,7 @@ export function renderCvTab({ jobs = [], answers = [], allowTailoredCv = false, 
     <td>${pct(j.cv_match_percent)}</td>
     <td>${pct(j.cv_drift_percent)}</td>
     <td class="dim">${esc(j.cv_missing_terms || 'none')}</td>
+    <td>${esc(j.selected_cv_id || 'main')}<div class="dim">${esc(j.selected_cv_reason || '')}</div></td>
     <td>${esc(j.tailor_status || 'not_requested')}</td>
   </tr>`).join('');
   const answerRows = answers.map(a => `<tr>
@@ -29,7 +30,7 @@ export function renderCvTab({ jobs = [], answers = [], allowTailoredCv = false, 
       <button class="cbtn ${allowTailoredCv ? 'off' : 'on'}" onclick="tailoredConsent(${!allowTailoredCv})">${allowTailoredCv ? 'Disable tailored uploads' : 'Approve tailored CV drafts/uploads'}</button></p>
   </div>
   <h2>CV match and drift by job</h2>
-  ${table('cv_jobs', ['Role / company', 'Match', 'Drift', 'Terms not evidenced', 'Tailoring'], jobRows, 'No CV assessments yet')}
+  ${table('cv_jobs', ['Role / company', 'Match', 'Drift', 'Terms not evidenced', 'Selected CV', 'Tailoring'], jobRows, 'No CV assessments yet')}
   <h2>Answer confidence report</h2>
   <p class="dim" style="margin-bottom:8px">These inferred answers remain reviewable in Questions. Confidence is a transparent estimate of how directly the answer came from the canonical profile/CV.</p>
   ${table('answer_report', ['Question', 'Answer', 'Confidence', 'Match', 'Basis'], answerRows, 'No agent-inferred answers yet')}`.trim();

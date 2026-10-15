@@ -1,7 +1,7 @@
 // scripts/mark-saudi-fake.mjs — mark the user-flagged fake "Saudi HR" batch as FAKE.
 // Sets each lead's status to 'fake' + records every address in the fake_emails registry so no
-// brain (now or future) contacts them again. The durable code-level patterns live in
-// src/fake-emails.js (contributed back); this handles the per-user DB side.
+// brain (now or future) contacts them again. The durable list lives in
+// src/fake-emails.txt (contributed back); this handles the per-user DB side.
 import { initDB, save, rows, setStatus, markFakeEmail } from '../src/tracker.js';
 
 await initDB();

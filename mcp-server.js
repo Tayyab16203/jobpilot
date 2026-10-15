@@ -8,7 +8,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
-import { initDB, upsertJobs, allJobs, setStatus, counts, logEmail, alreadyEmailed, alreadyApplied, allEmailsSent, doneToday } from './src/tracker.js';
+import { initDB, upsertJobs, allJobs, setStatus, counts, logEmail, alreadyEmailed, alreadyApplied, allEmailsSent, doneToday, isBadEmail, isFakeEmail } from './src/tracker.js';
 import { initAttempts, recordStep, attemptCount, canAttempt, recentSteps, stepStats } from './src/attempts.js';
 import { getProfile, updateProfile, profileGaps, isOnboarded } from './src/profile.js';
 import { cdpStatus, listTabs, verifyLogins } from './src/agent/browser.js';
@@ -194,6 +194,11 @@ const TOOLS = [
     handler: async ({ to, subject, body, company, role, jobUrl, attachmentPath }) => {
       const profile = getProfile();
       const limit = profile.limits.maxAttemptsPerJob;
+      if (isFakeEmail(to)) {
+        if (jobUrl) setStatus(jobUrl, 'fake', 'known fake address — not contacted');
+        return ok({ skipped: true, reason: 'fake_email', detail: `${to} is on the fake-email list` });
+      }
+      if (isBadEmail(to)) return ok({ skipped: true, reason: 'bad_email', detail: `${to} is not a hiring contact` });
       if (alreadyEmailed(to)) return ok({ skipped: true, reason: 'already_emailed', detail: `${to} already contacted` });
       // Fall back to the proven profile-driven template when not supplied.
       const job = { company: company || '', role: role || 'the role', url: jobUrl || '' };
@@ -325,6 +330,8 @@ const TOOLS = [
       const profile = getProfile();
       const { apply_method, email, formUrl, jobUrl, posterUrl, role, company } = lead;
       // Dedup guards
+      if (email && isFakeEmail(email)) return ok({ action: 'skip', reason: 'fake_email', detail: email });
+      if (email && isBadEmail(email)) return ok({ action: 'skip', reason: 'bad_email', detail: email });
       if (email && alreadyEmailed(email)) return ok({ action: 'skip', reason: 'already_emailed', detail: email });
       if (alreadyApplied(company || '', role || '')) return ok({ action: 'skip', reason: 'already_applied', detail: `${company} ${role}` });
 

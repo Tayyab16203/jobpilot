@@ -4,12 +4,15 @@
 // recorded as sent unless it really was).
 import { getContext } from '../agent/browser.js';
 import { getProfile } from '../profile.js';
+import { isBadEmail, isFakeEmail } from '../tracker.js';
 import fs from 'fs';
 import path from 'path';
 
 const SLEEP = ms => new Promise(r => setTimeout(r, ms));
 
 export async function sendViaGmail({ to, subject, body, attachmentPath }) {
+  if (isFakeEmail(to)) return { ok: false, result: 'skipped', skipped: true, detail: 'fake email — listed in src/fake-emails.txt' };
+  if (isBadEmail(to)) return { ok: false, result: 'skipped', skipped: true, detail: 'not a hiring contact' };
   // Keep context/page creation INSIDE the try so a CDP/connect failure is CLASSIFIED as a
   // transient error (retry later, attempt NOT burned) instead of throwing out of the function.
   let page = null;

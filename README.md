@@ -237,6 +237,29 @@ the dashboard **⏹ Stop** button (or `npm run stop`).
 
 ---
 
+### Per-job CV variants
+
+The canonical `cvPath` remains the fallback, but `preferences.cvVariants` can list private
+local resume variants. Each entry may provide an `id`, `label`, `path`, `focuses`, and
+`keywords`; the worker scores the job title and description for provider/domain signals such as
+AWS, Azure, GCP, SRE, DataOps, or MLOps, then uploads the best matching configured file. The
+selected variant and matching reason appear in the dashboard CV report. Keep these paths in the
+ignored per-user profile; never commit resumes, profile data, credentials, or invented experience.
+
+```json
+{
+  "preferences": {
+    "cvVariants": [
+      { "id": "aws", "label": "AWS CV", "path": "/private/path/aws.pdf", "focuses": ["aws"], "keywords": ["eks", "s3"] },
+      { "id": "sre", "label": "SRE CV", "path": "/private/path/sre.pdf", "focuses": ["sre"], "keywords": ["slo", "observability"] }
+    ]
+  }
+}
+```
+
+Missing job requirements are reported for review. JobPilot does not add unverified skills or
+employment history to a resume.
+
 ## 📊 The dashboard
 
 A local-only UI at **http://127.0.0.1:7788** (bound to localhost):
