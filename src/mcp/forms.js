@@ -138,10 +138,66 @@ async function resolveWeWorkRemotely(page) {
   return atsUrl || null;
 }
 
+// Ashby (jobs.ashbyhq.com) — client-rendered React form that only exists in the
+// DOM after the application view is opened and hydrated. Steps:
+//   1. Normalise to the /application view (strip any query string / trailing slash,
+//      the posting UUID keeps its own path), so a bare posting URL or a
+//      ?utm_source=… variant both land on the form route.
+//   2. If no form inputs are present yet, click the "Apply for this Job" /
+//      "Submit Application" reveal button to mount the form.
+//   3. Poll for real text/email inputs or a file input to appear (React hydration
+//      is async) before returning, so the caller's SCAN sees the fields.
+async function toAshbyForm(page) {
+  const hasForm = async () => page.evaluate(() => {
+    const vis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    const inputs = [...document.querySelectorAll('input[type="text"], input[type="email"], textarea')].filter(vis);
+    const files = document.querySelectorAll('input[type="file"]').length;
+    return inputs.length >= 2 || files > 0;
+  }).catch(() => false);
+
+  // 1. Normalise to the /application route (preserve the posting path, drop query/hash).
+  let u = page.url();
+  try {
+    const parsed = new URL(u);
+    let p = parsed.pathname.replace(/\/+$/, '');
+    if (!/\/application$/.test(p)) p += '/application';
+    const target = parsed.origin + p;
+    if (target !== u.split('?')[0].split('#')[0].replace(/\/+$/, '')) {
+      await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    }
+  } catch {}
+  await SLEEP(2500);
+
+  // 2. If the form isn't mounted, click the reveal/apply button.
+  if (!(await hasForm())) {
+    const applyBtn = page.getByRole('button', { name: /apply for this job|apply now|^apply$|submit application|application/i })
+      .or(page.getByRole('link', { name: /apply for this job|apply now|^apply$/i }))
+      .first();
+    if (await applyBtn.isVisible({ timeout: 4000 }).catch(() => false)) {
+      await applyBtn.click({ timeout: 6000 }).catch(() => {});
+      await SLEEP(2000);
+    }
+  }
+
+  // 3. Poll for the hydrated form (up to ~12s).
+  for (let i = 0; i < 12; i++) {
+    if (await hasForm()) break;
+    await SLEEP(1000);
+  }
+}
+
 async function toForm(page) {
   const u = page.url();
   if (/jobs\.lever\.co\/[^/]+\/[0-9a-f-]{36}$/.test(u)) { await page.goto(u + '/apply', { waitUntil: 'domcontentloaded' }); return; }
-  if (/jobs\.ashbyhq\.com\/[^/]+\/[0-9a-f-]{36}\/?$/.test(u)) { await page.goto(u.replace(/\/$/, '') + '/application', { waitUntil: 'domcontentloaded' }); return; }
+  // Ashby is a client-rendered React app: the posting page shows only the job
+  // description, and the application fields do not exist in the DOM until the
+  // "Apply for this Job" button is clicked AND the form has hydrated. The old
+  // one-liner appended /application and scanned immediately, catching an empty
+  // #root (0 inputs) → "no_form" (encounters #109, #96). Route every ashbyhq URL
+  // — including the ?utm_source=… query-string variant — through a handler that
+  // navigates to the application view, reveals the form, and waits for real
+  // inputs to render before returning.
+  if (/jobs\.ashbyhq\.com\//.test(u)) { await toAshbyForm(page); return; }
 
   // lnkd.in shortlinks — follow the redirect to the real URL before processing as a form.
   if (/lnkd\.in\//.test(u)) {

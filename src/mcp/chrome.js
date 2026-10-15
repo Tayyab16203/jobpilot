@@ -35,13 +35,39 @@ function portOpen(port = 9222, host = '127.0.0.1', timeout = 1000) {
 }
 
 /**
+ * Authoritative "is a real debug Chrome listening?" check.
+ * A raw TCP connect can succeed against lingering TIME_WAIT sockets on the
+ * port (common on Windows after a prior Chrome exits), which made launchChrome
+ * wrongly report 'already_up' and skip spawning. The CDP HTTP endpoint
+ * /json/version only responds when an actual DevTools server is live, so this
+ * is the reliable readiness signal.
+ */
+function cdpUp(port = 9222, host = '127.0.0.1', timeout = 1500) {
+  return new Promise(resolve => {
+    const req = net.connect({ port, host }, () => {
+      req.write(`GET /json/version HTTP/1.1\r\nHost: ${host}:${port}\r\nConnection: close\r\n\r\n`);
+    });
+    let data = '';
+    const done = ok => { try { req.destroy(); } catch {} resolve(ok); };
+    req.setTimeout(timeout);
+    req.on('data', chunk => {
+      data += chunk.toString('utf8');
+      if (/^HTTP\/1\.[01] 200/i.test(data) && /webSocketDebuggerUrl|Browser/i.test(data)) done(true);
+    });
+    req.on('timeout', () => done(false));
+    req.on('error', () => done(false));
+    req.on('end', () => done(/^HTTP\/1\.[01] 200/i.test(data)));
+  });
+}
+
+/**
  * Ensure a debug Chrome is up on :9222 using the dedicated profile dir.
  * If the port is already up → attach, touch nothing.
  * Else → launch a SEPARATE Chrome on data/chrome-debug-profile. Your real
  * Chrome is never closed or affected.
  */
 export async function launchChrome() {
-  if (await portOpen()) {
+  if (await cdpUp()) {
     return { ok: true, state: 'already_up', detail: 'Debug Chrome already on :9222 — attached, nothing else touched' };
   }
 
@@ -61,7 +87,7 @@ export async function launchChrome() {
   child.unref();
 
   for (let i = 0; i < 20; i++) {
-    if (await portOpen()) {
+    if (await cdpUp()) {
       return {
         ok: true,
         state: firstRun ? 'launched_fresh' : 'launched',
