@@ -22,22 +22,26 @@ const SLEEP = ms => new Promise(r => setTimeout(r, ms));
 const SMARTAPPLY_RE = /smartapply\.indeed\.com|indeedapply\/form/i;
 
 // A VISIBLE human-check (not an invisible/enterprise reCAPTCHA badge that never challenges).
+// Scans the top document AND every child frame, since the challenge iframe is usually nested.
 async function visibleHumanCheck(page) {
-  try {
-    return await page.evaluate(() => {
-      // Cloudflare interstitial / Turnstile / hCaptcha / visible reCAPTCHA challenge frames.
-      const frames = [...document.querySelectorAll('iframe')];
-      const challenge = frames.find(f => {
-        const src = f.src || '';
-        if (!/recaptcha.*bframe|hcaptcha.*challenge|turnstile|cloudflare|challenges\.cloudflare/i.test(src)) return false;
-        const r = f.getBoundingClientRect();
-        return r.width > 60 && r.height > 60;   // actually rendered, not the 0×0 invisible badge
-      });
-      if (challenge) return true;
-      const txt = (document.body?.innerText || '').toLowerCase();
-      return /verify you are human|confirm you are human|are you a robot|complete the (security )?check|i'm not a robot|checking your browser|just a moment/i.test(txt);
-    });
-  } catch { return false; }
+  for (const fr of page.frames()) {
+    try {
+      const hit = await fr.evaluate(() => {
+        const frames = [...document.querySelectorAll('iframe')];
+        const challenge = frames.find(f => {
+          const src = f.src || '';
+          if (!/recaptcha.*bframe|hcaptcha.*challenge|turnstile|cloudflare|challenges\.cloudflare/i.test(src)) return false;
+          const r = f.getBoundingClientRect();
+          return r.width > 60 && r.height > 60;   // actually rendered, not the 0×0 invisible badge
+        });
+        if (challenge) return true;
+        const txt = (document.body?.innerText || '').toLowerCase();
+        return /verify you are human|confirm you are human|are you a robot|complete the (security )?check|i'm not a robot|checking your browser|just a moment/i.test(txt);
+      }).catch(() => false);
+      if (hit) return true;
+    } catch {}
+  }
+  return false;
 }
 
 async function findSmartApplyTab(ctx) {
@@ -47,11 +51,30 @@ async function findSmartApplyTab(ctx) {
   return null;
 }
 
+// SmartApply renders its form (resume selection, questions, review + "Submit your application")
+// inside a child frame, not the top document. Find the frame that actually holds the apply
+// controls so fill/advance/confirm operate where the form really lives. Falls back to the main
+// frame. Returns a Playwright Frame.
+async function contentFrame(page) {
+  for (const fr of page.frames()) {
+    try {
+      if (!/indeedapply\/form|smartapply/i.test(fr.url())) continue;
+      const has = await fr.evaluate(() =>
+        !!document.querySelector('input,select,textarea,button') &&
+        /submit your application|continue|review|resume|question/i.test(document.body?.innerText || '')
+      ).catch(() => false);
+      if (has) return fr;
+    } catch {}
+  }
+  return page.mainFrame();
+}
+
 // Fill the fields on the current SmartApply step from profile + answer engine. Never touches the
-// g-recaptcha-response field. Returns the list of required questions it could NOT answer.
-async function fillStep(page) {
+// g-recaptcha-response field. Operates on a Frame (the SmartApply content frame). Returns the
+// list of required questions it could NOT answer.
+async function fillStep(frame) {
   const p = getProfile();
-  const scan = await page.evaluate(() => {
+  const scan = await frame.evaluate(() => {
     const out = [];
     for (const el of document.querySelectorAll('input,select,textarea')) {
       if (el.type === 'hidden' || el.name === 'g-recaptcha-response') continue;
@@ -69,13 +92,13 @@ async function fillStep(page) {
       if (f.tag === 'SELECT') {
         if (f.value) continue;
         const a = choiceAnswer(q, []);
-        if (a) await page.selectOption(`[name="${f.name}"]`, { label: String(a) }).catch(() => {});
+        if (a) await frame.selectOption(`[name="${f.name}"]`, { label: String(a) }).catch(() => {});
         else if (f.required) { unanswered.push(q); askLater(q); }
       } else if (f.type === 'radio' || f.type === 'checkbox') {
         // Radio/checkbox groups: let the engine pick an option label, click the matching control.
         const a = choiceAnswer(q, []);
         if (a) {
-          const opt = page.getByLabel(new RegExp(String(a).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')).first();
+          const opt = frame.getByLabel(new RegExp(String(a).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')).first();
           await opt.check({ timeout: 2000 }).catch(() => {});
         }
       } else {
@@ -83,7 +106,7 @@ async function fillStep(page) {
         const numeric = f.type === 'number' || /salary|years|experience|notice|how many|number/i.test(q);
         const a = textAnswer(q, { numeric });
         if (a != null && a !== '') {
-          const loc = page.locator(f.name ? `[name="${f.name}"]` : `textbox`).first();
+          const loc = frame.locator(f.name ? `[name="${f.name}"]` : `textbox`).first();
           await loc.fill(String(a), { timeout: 2500 }).catch(() => {});
         } else if (f.required) { unanswered.push(q); askLater(q); }
       }
@@ -92,22 +115,26 @@ async function fillStep(page) {
   return unanswered;
 }
 
-async function clickAdvance(page) {
-  // Click Continue / Review / Submit — the SmartApply primary action.
-  return await page.evaluate(() => {
-    const btns = [...document.querySelectorAll('button')].filter(b => !b.disabled);
+async function clickAdvance(frame) {
+  // Click Continue / Review / Submit — the SmartApply primary action, inside the content frame.
+  return await frame.evaluate(() => {
+    const btns = [...document.querySelectorAll('button, [role="button"]')].filter(b => !b.disabled);
     const primary = btns.find(b => /submit your application|submit application|^submit$/i.test((b.innerText || '').trim()))
       || btns.find(b => /continue|review your application|^review$|^next$/i.test((b.innerText || '').trim()));
     if (primary) { const label = (primary.innerText || '').trim(); primary.click(); return label; }
     return null;
-  });
+  }).catch(() => null);
 }
 
+// Confirmation can land in any frame — scan them all.
 async function confirmed(page) {
-  try {
-    const t = (await page.evaluate(() => document.body?.innerText || '')).toLowerCase();
-    return /application submitted|your application has been submitted|successfully applied|application sent|thanks for applying|we('|’)ve received your application/i.test(t);
-  } catch { return false; }
+  for (const fr of page.frames()) {
+    try {
+      const t = (await fr.evaluate(() => document.body?.innerText || '')).toLowerCase();
+      if (/application submitted|your application has been submitted|successfully applied|application sent|thanks for applying|we('|’)ve received your application|has been submitted/i.test(t)) return true;
+    } catch {}
+  }
+  return false;
 }
 
 /**
@@ -165,12 +192,13 @@ export async function humanAssistedApply({ jobUrl, resume = false }) {
       return { ok: true, result: 'submitted', detail: 'Application submitted + confirmed', url: page.url() };
     }
 
-    const unanswered = await fillStep(page);
+    const frame = await contentFrame(page);
+    const unanswered = await fillStep(frame);
     if (unanswered.length) {
       return { ok: false, result: 'needs_answers', detail: 'needs your answer: ' + unanswered.slice(0, 4).join(' | ').slice(0, 300), questions: unanswered, url: page.url() };
     }
 
-    const advanced = await clickAdvance(page);
+    const advanced = await clickAdvance(frame);
     if (!advanced) {
       // No primary button and no confirmation — either done or stuck.
       await SLEEP(1500);
