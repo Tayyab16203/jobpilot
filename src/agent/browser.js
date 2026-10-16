@@ -23,8 +23,48 @@ export async function cdpStatus() {
   } catch (e) { clearTimeout(t); return { ok: false, reason: e.message }; }
 }
 
+// Prune stale/zombie targets before attaching. connectOverCDP enumerates every open
+// target on attach; a hung page/iframe/worker left over from a previous (killed) process
+// makes that enumeration hang for the full timeout — the real cause of the recurring
+// "connectOverCDP: Timeout 60000ms exceeded" even though /json/version returns 200.
+// We close blank and about:blank pages and any obviously stuck targets via the CDP HTTP
+// API (which does NOT need Playwright), keeping at most a couple of real pages.
+async function pruneStaleTargets() {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 4000);
+    const r = await fetch(`${CDP}/json/list`, { signal: ctrl.signal }).catch(() => null);
+    clearTimeout(t);
+    if (!r || !r.ok) return;
+    const targets = await r.json().catch(() => []);
+    const pages = targets.filter(x => x.type === 'page');
+    // Close blank/new-tab pages; they add attach cost and are never useful to us.
+    const closable = pages.filter(p => /^(about:blank|chrome:\/\/newtab|chrome:\/\/new-tab-page)/i.test(p.url || '') || !(p.url || '').trim());
+    // If there are a lot of pages, also close the oldest extras (keep the 3 most recent real ones).
+    const realExtra = pages.filter(p => !closable.includes(p)).slice(3);
+    let toClose = [...closable, ...realExtra];
+    // CRITICAL: never close the LAST page. Chrome EXITS when its final page is closed. The debug
+    // Chrome is typically launched with a single about:blank, so prune would close it, Chrome
+    // would quit, and the subsequent connectOverCDP would hit a dead browser (ECONNREFUSED) and
+    // relaunch — a self-sustaining flap where the attach itself kills Chrome. Always leave ≥1.
+    if (toClose.length >= pages.length && pages.length > 0) {
+      toClose = toClose.filter(p => p.id !== pages[0].id);
+    }
+    for (const p of toClose) {
+      if (!p.id) continue;
+      const c = new AbortController(); const ct = setTimeout(() => c.abort(), 2500);
+      await fetch(`${CDP}/json/close/${p.id}`, { signal: c.signal }).catch(() => {});
+      clearTimeout(ct);
+    }
+  } catch {}
+}
+
 export async function getBrowser() {
+  // Validate the cached connection cheaply. isConnected() can report true on a
+  // half-dead channel, so if a later newPage() fails the caller drops the cache
+  // via resetBrowser(). Here we just reuse a live-looking connection.
   if (_browser && _browser.isConnected()) return _browser;
+  _browser = null;
   let status = await cdpStatus();
   if (!status.ok) {
     // Self-heal: auto-launch the debug Chrome on demand so no one ever has to ask.
@@ -38,37 +78,61 @@ export async function getBrowser() {
     throw new Error(`Chrome CDP not available (${status.reason}). Tried to auto-launch it; if this persists, open Chrome once.`);
   }
 
+  // Prune stale targets BEFORE attaching so enumeration can't hang on a zombie page.
+  await pruneStaleTargets();
+
   // Use the browser-level WebSocket URL directly from /json/version.
   // This skips Playwright's own CDP discovery step that times out when Chrome
-  // has many open tabs/contexts — the single most common cause of the
-  // "connectOverCDP: Timeout 30000ms exceeded" error.
+  // has many open tabs/contexts.
   const wsEndpoint = status.wsUrl || CDP;
   let lastErr;
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  // Shorter per-attempt timeout (20s) so a hung attach fails fast and we retry on a
+  // fresh connection + re-prune, instead of blocking the whole lane for 60s×3.
+  for (let attempt = 1; attempt <= 4; attempt++) {
     try {
       // Chrome 155 rejects Playwright's Browser.setDownloadBehavior command
-      // when it is attached over CDP. The worker uses the existing profile's
-      // downloads, so skip Playwright's default context-management commands.
-      _browser = await chromium.connectOverCDP(wsEndpoint, { timeout: 60000, noDefaults: true });
+      // when it is attached over CDP. Skip Playwright's default context-management.
+      _browser = await chromium.connectOverCDP(wsEndpoint, { timeout: 20000, noDefaults: true });
       return _browser;
     } catch (e) {
       lastErr = e;
-      if (attempt < 3) await new Promise(r => setTimeout(r, 3000 * attempt));
+      _browser = null;
+      if (attempt < 4) { await pruneStaleTargets(); await new Promise(r => setTimeout(r, 2000 * attempt)); }
     }
   }
-  throw new Error(`connectOverCDP failed after 3 attempts: ${lastErr?.message}`);
+  throw new Error(`connectOverCDP failed after 4 attempts: ${lastErr?.message}`);
 }
 
+/** Drop the cached browser so the next getBrowser() reconnects fresh. */
+export function resetBrowser() { try { _browser?.close?.().catch(() => {}); } catch {} _browser = null; }
+
 export async function getContext() {
-  const b = await getBrowser();
-  return b.contexts()[0] || await b.newContext();
+  try {
+    const b = await getBrowser();
+    return b.contexts()[0] || await b.newContext();
+  } catch (e) {
+    // Half-dead cached connection: reset and reconnect once before giving up.
+    resetBrowser();
+    const b = await getBrowser();
+    return b.contexts()[0] || await b.newContext();
+  }
 }
 
 export async function newPage(timeout = 30000) {
-  const ctx = await getContext();
-  const p = await ctx.newPage();
-  p.setDefaultTimeout(timeout);
-  return p;
+  let ctx;
+  try {
+    ctx = await getContext();
+    const p = await ctx.newPage();
+    p.setDefaultTimeout(timeout);
+    return p;
+  } catch (e) {
+    // Context went stale between attach and newPage — reset and try once more.
+    resetBrowser();
+    ctx = await getContext();
+    const p = await ctx.newPage();
+    p.setDefaultTimeout(timeout);
+    return p;
+  }
 }
 
 // Verify a REAL logged-in session by navigating and reading auth signals —
