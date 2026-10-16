@@ -144,12 +144,24 @@ async function confirmed(page) {
  * @param {boolean} a.resume  true → re-attach to the open SmartApply tab and continue after the
  *                            user has solved the on-screen human-check.
  */
-export async function humanAssistedApply({ jobUrl, resume = false }) {
+export async function humanAssistedApply(args) {
+  let pageRef = { page: null };
+  const r = await _humanAssistedApply(args, pageRef);
+  // Close the SmartApply tab on terminal outcomes to prevent tab leaks (72+ tabs choke Chrome).
+  // Keep it open ONLY when we need the user to act and then resume on the same tab.
+  if (r.result !== 'waiting_for_human' && r.result !== 'needs_answers') {
+    try { await pageRef.page?.close(); } catch {}
+  }
+  return r;
+}
+
+async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
   const ctx = await getContext();
   let page;
 
   if (resume) {
     page = await findSmartApplyTab(ctx);
+    pageRef.page = page;
     if (!page) return { ok: false, result: 'error', detail: 'no open SmartApply tab to resume — start the apply again', url: jobUrl };
     await page.bringToFront().catch(() => {});
     // If the human-check is still on screen, keep waiting.
@@ -164,6 +176,7 @@ export async function humanAssistedApply({ jobUrl, resume = false }) {
     }
   } else {
     page = await ctx.newPage();
+    pageRef.page = page;
     page.setDefaultTimeout(15000);
     await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => {});
     await SLEEP(3500);
@@ -177,7 +190,7 @@ export async function humanAssistedApply({ jobUrl, resume = false }) {
     if (!entered) return { ok: false, result: 'no_apply', detail: 'no Indeed Apply button on this posting', url: jobUrl };
     await SLEEP(6000);
     const sa = await findSmartApplyTab(ctx);
-    if (sa) page = sa;
+    if (sa) { page = sa; pageRef.page = sa; }
   }
 
   // Walk the multi-step form. Stop and hand off the moment a VISIBLE human-check appears.
