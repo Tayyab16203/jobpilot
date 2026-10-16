@@ -55,27 +55,52 @@ const hostOf = u => { try { return new URL(u).hostname; } catch { return ''; } }
 async function resolveIndeed(page) {
   // Indeed embeds the employer's apply URL in a data attribute or an <a> tag inside
   // the job posting detail. Try the most common selectors first.
-  const atsUrl = await page.evaluate(() => {
-    // 1. "Apply on company website" button href
+  const found = await page.evaluate(() => {
+    // 1. "Apply on company website" button href pointing straight off indeed.com
     const ext = document.querySelector('a[data-indeed-apply-joburl], a[href*="indeedapply"], .jobsearch-IndeedApplyButton-newDesign a');
-    if (ext?.href && !ext.href.includes('indeed.com')) return ext.href;
+    if (ext?.href && !ext.href.includes('indeed.com')) return { direct: ext.href };
 
     // 2. Metadata inside the apply widget
     const meta = document.querySelector('[data-indeed-apply-apitoken], [data-indeed-apply-joburl]');
     if (meta) {
       const u = meta.getAttribute('data-indeed-apply-joburl') || meta.getAttribute('action');
-      if (u && !u.includes('indeed.com')) return u;
+      if (u && !u.includes('indeed.com')) return { direct: u };
     }
 
     // 3. Any visible "Apply" link pointing off indeed.com
     for (const a of document.querySelectorAll('a[href]')) {
       const txt = (a.innerText || '').toLowerCase();
-      if ((txt.includes('apply') || txt.includes('company site')) && !a.href.includes('indeed.com')) return a.href;
+      if ((txt.includes('apply') || txt.includes('company site')) && !a.href.includes('indeed.com')) return { direct: a.href };
+    }
+
+    // 4. "Apply on company site" that points at Indeed's own redirect endpoint
+    //    (/applystart?jk=…). This is NOT Indeed's in-app Easy Apply widget (which has
+    //    #indeedApplyButton / [data-indeed-apply-apitoken]); it is a bounce link to the
+    //    employer's real ATS that merely passes THROUGH indeed.com first. Following it in
+    //    the logged-in session lands on the real Greenhouse/Lever/Ashby/Workable page.
+    for (const a of document.querySelectorAll('a[href]')) {
+      const txt = (a.innerText || '').toLowerCase();
+      if ((txt.includes('company site') || txt.includes('company website')) && /\/applystart\b|\/rc\/clk\b/.test(a.href)) return { redirect: a.href };
     }
     return null;
   }).catch(() => null);
 
-  return atsUrl || null;
+  if (!found) return null;
+  if (found.direct) return found.direct;
+
+  // Follow the Indeed redirect link within the authenticated session and capture where
+  // it finally lands. If it leaves indeed.com, that destination is the real ATS; hand it
+  // back to applyForm(). If it stays on indeed.com (in-site Indeed Apply), we have no
+  // external ATS to drive — signal that so the caller routes to connect/email.
+  if (found.redirect) {
+    try {
+      await page.goto(found.redirect, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await SLEEP(3500);
+      const dest = page.url();
+      if (dest && !/indeed\.com/.test(dest)) return dest;
+    } catch { /* fall through */ }
+  }
+  return null;
 }
 
 // ── Glassdoor: click the "Apply on company site" CTA and return the destination URL.

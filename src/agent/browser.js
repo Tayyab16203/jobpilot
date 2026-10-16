@@ -23,6 +23,42 @@ export async function cdpStatus() {
   } catch (e) { clearTimeout(t); return { ok: false, reason: e.message }; }
 }
 
+// Prune stale/zombie targets before attaching. connectOverCDP enumerates every open
+// target on attach; a hung page/iframe/worker left over from a previous (killed) process
+// makes that enumeration hang for the full timeout — the real cause of the recurring
+// "connectOverCDP: Timeout 60000ms exceeded" even though /json/version returns 200.
+// We close blank and about:blank pages and any obviously stuck targets via the CDP HTTP
+// API (which does NOT need Playwright), keeping at most a couple of real pages.
+async function pruneStaleTargets() {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 4000);
+    const r = await fetch(`${CDP}/json/list`, { signal: ctrl.signal }).catch(() => null);
+    clearTimeout(t);
+    if (!r || !r.ok) return;
+    const targets = await r.json().catch(() => []);
+    const pages = targets.filter(x => x.type === 'page');
+    // Close blank/new-tab pages; they add attach cost and are never useful to us.
+    const closable = pages.filter(p => /^(about:blank|chrome:\/\/newtab|chrome:\/\/new-tab-page)/i.test(p.url || '') || !(p.url || '').trim());
+    // If there are a lot of pages, also close the oldest extras (keep the 3 most recent real ones).
+    const realExtra = pages.filter(p => !closable.includes(p)).slice(3);
+    let toClose = [...closable, ...realExtra];
+    // CRITICAL: never close the LAST page. Chrome EXITS when its final page is closed. The debug
+    // Chrome is typically launched with a single about:blank, so prune would close it, Chrome
+    // would quit, and the subsequent connectOverCDP would hit a dead browser (ECONNREFUSED) and
+    // relaunch — a self-sustaining flap where the attach itself kills Chrome. Always leave ≥1.
+    if (toClose.length >= pages.length && pages.length > 0) {
+      toClose = toClose.filter(p => p.id !== pages[0].id);
+    }
+    for (const p of toClose) {
+      if (!p.id) continue;
+      const c = new AbortController(); const ct = setTimeout(() => c.abort(), 2500);
+      await fetch(`${CDP}/json/close/${p.id}`, { signal: c.signal }).catch(() => {});
+      clearTimeout(ct);
+    }
+  } catch {}
+}
+
 export async function getBrowser() {
   if (_browser && _browser.isConnected()) return _browser;
   let status = await cdpStatus();
