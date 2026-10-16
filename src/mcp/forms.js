@@ -132,10 +132,10 @@ async function resolveIndeed(page) {
   if (!found) return null;
   if (found.direct) return found.direct;
 
-  // Follow the Indeed redirect link within the authenticated session and capture where
-  // it finally lands. If it leaves indeed.com, that destination is the real ATS; hand it
-  // back to applyForm(). If it stays on indeed.com (in-site Indeed Apply), we have no
-  // external ATS to drive — signal that so the caller routes to connect/email.
+  // Follow the Indeed redirect link within the authenticated session and capture where it finally
+  // lands. If it leaves indeed.com, that destination is the real ATS; hand it back to applyForm().
+  // If it stays on indeed.com (in-site Indeed Apply), there is no external ATS to drive — return
+  // null so the caller routes to connect/email.
   if (found.redirect) {
     try {
       await page.goto(found.redirect, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
@@ -177,7 +177,7 @@ async function resolveGlassdoor(page) {
     const dest = popup.url();
     await popup.close().catch(() => {});
     if (dest && !/glassdoor\.com/.test(dest) && !/smartapply\.indeed\.com/.test(dest)) return dest;
-    if (/smartapply\.indeed\.com/.test(dest)) return null;   // Indeed Apply now — not this click
+    if (/smartapply\.indeed\.com/.test(dest)) return null;   // bounced to reCAPTCHA path
   }
 
   // Glassdoor navigates in the same tab sometimes.
