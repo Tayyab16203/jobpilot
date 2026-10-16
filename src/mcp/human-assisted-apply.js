@@ -153,6 +153,12 @@ export async function humanAssistedApply({ jobUrl, resume = false }) {
     if (!page) return { ok: false, result: 'error', detail: 'no open SmartApply tab to resume — start the apply again', url: jobUrl };
     await page.bringToFront().catch(() => {});
     // If the human-check is still on screen, keep waiting.
+    // Confirmation first: a solved reCAPTCHA leaves its (now-inert) challenge iframe in the DOM on
+    // the post-apply page, which would otherwise look like a live human-check. If the application
+    // is already confirmed, we are done regardless of leftover captcha frames.
+    if (await confirmed(page)) {
+      return { ok: true, result: 'submitted', detail: 'Application submitted + confirmed', url: page.url() };
+    }
     if (await visibleHumanCheck(page)) {
       return { ok: false, result: 'waiting_for_human', detail: 'Human-check still on screen — please click/solve it in the Chrome window, then resume again.', url: page.url() };
     }
@@ -178,6 +184,12 @@ export async function humanAssistedApply({ jobUrl, resume = false }) {
   for (let step = 0; step < 10; step++) {
     await SLEEP(2000);
 
+    // Confirmation BEFORE human-check: a solved captcha leaves its challenge iframe in the DOM on
+    // the confirmation page, so checking the captcha first would falsely re-pause a finished apply.
+    if (await confirmed(page)) {
+      return { ok: true, result: 'submitted', detail: 'Application submitted + confirmed', url: page.url() };
+    }
+
     if (await visibleHumanCheck(page)) {
       await encounter('human_check', 'visible CAPTCHA/Cloudflare on ' + (page.url().match(/[^/]+\/\/[^/]+/) || [''])[0], { url: page.url(), page }).catch(() => {});
       return {
@@ -186,10 +198,6 @@ export async function humanAssistedApply({ jobUrl, resume = false }) {
         detail: '🧑 Human-check on screen (CAPTCHA/Cloudflare). Please click/solve it in the debug Chrome window, then call this tool again with resume:true to continue the application.',
         url: page.url(),
       };
-    }
-
-    if (await confirmed(page)) {
-      return { ok: true, result: 'submitted', detail: 'Application submitted + confirmed', url: page.url() };
     }
 
     const frame = await contentFrame(page);
