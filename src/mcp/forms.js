@@ -139,9 +139,22 @@ async function resolveIndeed(page) {
   if (found.redirect) {
     try {
       await page.goto(found.redirect, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-      await SLEEP(3500);
-      const dest = page.url();
-      if (dest && !/indeed\.com/.test(dest)) return dest;
+      // /applystart does a MULTI-HOP redirect (indeed → tracker → employer ATS). Reading the URL
+      // once can catch it mid-hop (still on indeed.com) or on a brief bounce back. Poll until the
+      // URL stabilizes: accept the first off-indeed.com host that stays put for two reads, and give
+      // up if it is still on indeed.com after the window (in-platform apply, not an external ATS).
+      let dest = page.url();
+      let stableOff = '';
+      for (let i = 0; i < 8; i++) {
+        await SLEEP(1500);
+        const now = page.url();
+        if (now && !/indeed\.com/.test(now) && !/smartapply\.indeed\.com/.test(now)) {
+          if (now === dest) { stableOff = now; break; }  // settled off-indeed
+        }
+        dest = now;
+      }
+      if (stableOff) return stableOff;
+      if (dest && !/indeed\.com/.test(dest)) return dest;  // off-indeed on last read even if not 2x-stable
     } catch { /* fall through */ }
   }
   return null;
