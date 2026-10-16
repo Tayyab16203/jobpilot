@@ -78,29 +78,49 @@ async function resolveIndeed(page) {
   return atsUrl || null;
 }
 
-// ── Glassdoor: click the "Apply on company site" CTA and return the destination URL.
+// ── Glassdoor: click the "Apply on employer site" CTA and return the employer-ATS URL.
+//    Glassdoor's own "Easy Apply" is Indeed SmartApply behind a reCAPTCHA (not auto-fillable
+//    and NOT something we evade), so only the "Apply on employer site" / "Apply on company site"
+//    path is driven here — it leads to a real Greenhouse/Lever/Ashby/Workable page.
 async function resolveGlassdoor(page) {
-  const btn = page.getByRole('link', { name: /apply on (company site|employer site)|apply now/i })
-    .or(page.locator('a[data-test="job-link"], a.applyButton').first());
-  if (!(await btn.first().isVisible({ timeout: 6000 }).catch(() => false))) return null;
+  // The current Glassdoor UI renders the CTA as <button data-test="applyButton"> (not an <a>),
+  // and its real navigation only fires on a TRUSTED user-gesture click — element.click() in page
+  // context does nothing. Use a real Playwright click on the button, and detect whether it is the
+  // employer-site button vs. the SmartApply "Easy Apply" button first.
+  const applyBtn = page.locator('button[data-test="applyButton"], a[data-test="applyButton"]').first();
+  const legacy = page.getByRole('link', { name: /apply on (company site|employer site)/i });
+  const target = (await applyBtn.isVisible({ timeout: 6000 }).catch(() => false)) ? applyBtn
+    : (await legacy.first().isVisible({ timeout: 2000 }).catch(() => false)) ? legacy.first()
+    : null;
+  if (!target) return null;
+
+  // If the visible CTA is "Easy Apply" (SmartApply/reCAPTCHA), do not drive it — signal null so
+  // the lead routes to connect/email instead.
+  const label = (await target.innerText().catch(() => '')).toLowerCase();
+  if (/easy apply/i.test(label)) return null;
 
   const ctx = page.context();
   const [popup] = await Promise.all([
-    ctx.waitForEvent('page', { timeout: 8000 }).catch(() => null),
-    btn.first().click({ timeout: 8000 }).catch(() => {}),
+    ctx.waitForEvent('page', { timeout: 10000 }).catch(() => null),
+    target.click({ timeout: 8000 }).catch(() => {}),
   ]);
 
   if (popup) {
     await popup.waitForLoadState('domcontentloaded').catch(() => {});
+    await SLEEP(2500);
     const dest = popup.url();
+    // Glassdoor sometimes routes employer-site applies through its own /partner redirect first;
+    // give it a moment and re-read, then only accept an off-glassdoor destination.
     await popup.close().catch(() => {});
-    if (dest && !dest.includes('glassdoor.com')) return dest;
+    if (dest && !/glassdoor\.com/.test(dest) && !/smartapply\.indeed\.com/.test(dest)) return dest;
+    // If the popup bounced to SmartApply (reCAPTCHA), treat as not auto-applyable.
+    if (/smartapply\.indeed\.com/.test(dest)) return null;
   }
 
-  // Glassdoor navigates in the same tab sometimes
+  // Glassdoor navigates in the same tab sometimes.
   await SLEEP(3000);
   const current = page.url();
-  if (!current.includes('glassdoor.com')) return current;
+  if (current && !/glassdoor\.com/.test(current) && !/smartapply\.indeed\.com/.test(current)) return current;
   return null;
 }
 
