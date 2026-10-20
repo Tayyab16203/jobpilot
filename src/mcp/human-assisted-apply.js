@@ -115,15 +115,26 @@ async function fillStep(frame) {
   return unanswered;
 }
 
-async function clickAdvance(frame) {
-  // Click Continue / Review / Submit — the SmartApply primary action, inside the content frame.
-  return await frame.evaluate(() => {
-    const btns = [...document.querySelectorAll('button, [role="button"]')].filter(b => !b.disabled);
-    const primary = btns.find(b => /submit your application|submit application|^submit$/i.test((b.innerText || '').trim()))
-      || btns.find(b => /continue|review your application|^review$|^next$/i.test((b.innerText || '').trim()));
-    if (primary) { const label = (primary.innerText || '').trim(); primary.click(); return label; }
-    return null;
-  }).catch(() => null);
+async function clickAdvance(page) {
+  // Click Continue / Review / Submit — the SmartApply primary action. The 2026 "beta" SmartApply
+  // renders the review step as the TOP document (not a child frame) and some steps live in a child
+  // frame, so scan every frame (main + children) and click the first primary button found. Match on
+  // visible text AND aria-label (the review "Submit application" control sometimes exposes its label
+  // only via aria-label), and skip the reCAPTCHA submit decoy.
+  for (const frame of page.frames()) {
+    const label = await frame.evaluate(() => {
+      const norm = b => ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '') + ' ' + (b.value || '')).trim();
+      const btns = [...document.querySelectorAll('button, [role="button"], input[type="submit"]')]
+        .filter(b => !b.disabled && b.offsetParent !== null && !/hcaptcha|g-recaptcha/i.test(b.className || ''));
+      const SUBMIT = /submit your application|submit application|^submit$/i;
+      const NEXT = /continue|review your application|^review$|^next$/i;
+      const primary = btns.find(b => SUBMIT.test(norm(b))) || btns.find(b => NEXT.test(norm(b)));
+      if (primary) { const l = norm(primary); primary.click(); return l; }
+      return null;
+    }).catch(() => null);
+    if (label) return label;
+  }
+  return null;
 }
 
 // Confirmation can land in any frame — scan them all.
@@ -219,7 +230,7 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
       return { ok: false, result: 'needs_answers', detail: 'needs your answer: ' + unanswered.slice(0, 4).join(' | ').slice(0, 300), questions: unanswered, url: page.url() };
     }
 
-    const advanced = await clickAdvance(frame);
+    const advanced = await clickAdvance(page);
     if (!advanced) {
       // No primary button and no confirmation — either done or stuck.
       await SLEEP(1500);
