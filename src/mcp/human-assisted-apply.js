@@ -115,15 +115,33 @@ async function fillStep(frame) {
   return unanswered;
 }
 
-async function clickAdvance(frame) {
-  // Click Continue / Review / Submit — the SmartApply primary action, inside the content frame.
-  return await frame.evaluate(() => {
-    const btns = [...document.querySelectorAll('button, [role="button"]')].filter(b => !b.disabled);
-    const primary = btns.find(b => /submit your application|submit application|^submit$/i.test((b.innerText || '').trim()))
-      || btns.find(b => /continue|review your application|^review$|^next$/i.test((b.innerText || '').trim()));
-    if (primary) { const label = (primary.innerText || '').trim(); primary.click(); return label; }
-    return null;
-  }).catch(() => null);
+async function clickAdvance(page) {
+  // Click Continue / Review / Submit — the SmartApply primary action. The 2026 "beta" SmartApply
+  // splits the review step across frames: the Edit/contact controls live in an about:srcdoc child
+  // frame while the "Submit your application" button is in the MAIN document — so scan EVERY frame
+  // (not just the content frame) and click the first primary button found.
+  for (const frame of page.frames()) {
+    const label = await frame.evaluate(() => {
+      const norm = b => ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '') + ' ' + (b.value || '')).trim();
+      // offsetParent is null for a position:fixed/sticky submit bar even when it is on-screen, so
+      // gate visibility on client rects instead — the review "Submit your application" is sticky.
+      const shown = el => el.getClientRects().length > 0 || el.offsetParent !== null;
+      // Tick any un-checked NON-recaptcha consent checkbox that gates submit (e.g. the cross-border
+      // data-transfer acknowledgement on international postings). Never touch g-recaptcha-response.
+      for (const cb of document.querySelectorAll('input[type="checkbox"]')) {
+        if (cb.name === 'g-recaptcha-response' || /recaptcha|captcha/i.test(cb.name || '')) continue;
+        if (!cb.checked && shown(cb)) { try { cb.click(); } catch {} }
+      }
+      const btns = [...document.querySelectorAll('button, [role="button"], input[type="submit"]')]
+        .filter(b => !b.disabled && shown(b) && !/hcaptcha|g-recaptcha/i.test(b.className || ''));
+      const primary = btns.find(b => /submit your application|submit application|^submit$/i.test(norm(b)))
+        || btns.find(b => /continue|review your application|^review$|^next$/i.test(norm(b)));
+      if (primary) { const l = norm(primary); primary.click(); return l; }
+      return null;
+    }).catch(() => null);
+    if (label) return label;
+  }
+  return null;
 }
 
 // Confirmation can land in any frame — scan them all.
@@ -219,7 +237,7 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
       return { ok: false, result: 'needs_answers', detail: 'needs your answer: ' + unanswered.slice(0, 4).join(' | ').slice(0, 300), questions: unanswered, url: page.url() };
     }
 
-    const advanced = await clickAdvance(frame);
+    const advanced = await clickAdvance(page);
     if (!advanced) {
       // No primary button and no confirmation — either done or stuck.
       await SLEEP(1500);
