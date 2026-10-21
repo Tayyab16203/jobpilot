@@ -183,11 +183,59 @@ async function fillStep(frame) {
   return unanswered;
 }
 
-async function clickAdvance(frame) {
+// Wait for a SmartApply module's real content to mount before we fill/advance it. SmartApply
+// first paints a bare site-chrome shell (no form controls, no primary button) and then mounts the
+// module's fields + Continue/Submit asynchronously. Poll the content frame until it has a real
+// control OR a non-captcha primary action, so fillStep sees the actual fields and the Continue
+// button has rendered. Degrades gracefully: returns after timeoutMs regardless.
+async function waitForModuleContent(page, frame, { timeoutMs = 9000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    // Confirmation / human-check can land here too — stop waiting and let the loop handle them.
+    try { if (await confirmed(page)) return; } catch {}
+    try { if (await visibleHumanCheck(page)) return; } catch {}
+    const ready = await frame.evaluate(() => {
+      const controls = document.querySelectorAll('input:not([type=hidden]):not([name="g-recaptcha-response"]),select,textarea').length;
+      const TID = /continue-button|form-action-continue|submit|review|next/i;
+      const TXT = /submit your application|submit application|^submit$|continue|review your application|^review$|^next$/i;
+      const hasAction = [...document.querySelectorAll('button,[role="button"]')].some(el => {
+        if (el.disabled) return false;
+        if (el.id === 'g-recaptcha-response' || el.closest('.g-recaptcha, [data-testid*="recaptcha" i]')) return false;
+        const tid = el.getAttribute('data-testid') || '';
+        if (tid && TID.test(tid)) return true;
+        const own = (el.innerText || '').trim();
+        if (own && TXT.test(own)) return true;
+        for (const sp of el.querySelectorAll('span')) { if (TXT.test((sp.textContent || '').trim())) return true; }
+        return false;
+      });
+      return controls > 0 || hasAction;
+    }).catch(() => false);
+    if (ready) return;
+    await SLEEP(500);
+  }
+}
+
+async function clickAdvance(frame, { timeoutMs = 9000 } = {}) {
   // Click Continue / Review / Submit — the SmartApply primary action, inside the content frame.
   // SmartApply addresses the button by data-testid (e.g. continue-button, form-action-continue)
   // and often puts the visible label on a nested <span>, so match by testid OR own/nested-span
   // text. NEVER match or click the reCAPTCHA control.
+  //
+  // SmartApply mounts each module's content (and its primary button) ASYNCHRONOUSLY after the
+  // route transitions (e.g. /questions-module → /questions-module/questions/1): for the first
+  // few seconds the page is bare site-chrome with no Continue in the DOM. Poll for the real
+  // button up to timeoutMs so we don't give up on a page that simply hasn't finished rendering —
+  // this is the fix for the spurious "could not find a Continue/Submit button" on form modules.
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const label = await _clickAdvanceOnce(frame);
+    if (label) return label;
+    if (Date.now() >= deadline) return null;
+    await SLEEP(600);
+  }
+}
+
+async function _clickAdvanceOnce(frame) {
   const inPage = await frame.evaluate(() => {
     const SUBMIT = /submit your application|submit application|^submit$/i;
     const CONT = /continue|review your application|^review$|^next$/i;
@@ -345,7 +393,13 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
       };
     }
 
-    const frame = await contentFrame(page);
+    // SmartApply mounts a module's fields + primary button a few seconds AFTER the route
+    // transitions (the bare /questions-module shell renders first with no controls). Wait for the
+    // module content to settle so fillStep operates on the real fields, not the empty shell —
+    // otherwise required questions go unfilled and the Continue button never enables.
+    let frame = await contentFrame(page);
+    await waitForModuleContent(page, frame);
+    frame = await contentFrame(page);
     const unanswered = await fillStep(frame);
     if (unanswered.length) {
       return { ok: false, result: 'needs_answers', detail: 'needs your answer: ' + unanswered.slice(0, 4).join(' | ').slice(0, 300), questions: unanswered, url: page.url() };
