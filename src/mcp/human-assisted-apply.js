@@ -19,6 +19,31 @@ import { textAnswer, choiceAnswer } from './answers.js';
 import { encounter, askLater } from '../evolve.js';
 
 const SLEEP = ms => new Promise(r => setTimeout(r, ms));
+
+/**
+ * Given a radio/checkbox group and the label the answer engine picked, return the option `value`
+ * that should be checked. Pure (no DOM / Playwright), so it is unit-testable. Matches the picked
+ * label to an option by exact label, then case-insensitive label, then value, then substring.
+ *
+ * @param {{name:string, options:{value:string,label:string,checked?:boolean}[]}} group
+ * @param {string} pickedLabel  the label choiceAnswer returned
+ * @returns {string|null} the value to check, or null if no option matches
+ */
+export function chooseRadioValue(group, pickedLabel) {
+  if (!group || !Array.isArray(group.options) || !group.options.length) return null;
+  const want = String(pickedLabel == null ? '' : pickedLabel).trim();
+  if (!want) return null;
+  const lc = want.toLowerCase();
+  const byExact = group.options.find(o => String(o.label || '').trim() === want);
+  if (byExact) return byExact.value;
+  const byCi = group.options.find(o => String(o.label || '').trim().toLowerCase() === lc);
+  if (byCi) return byCi.value;
+  const byVal = group.options.find(o => String(o.value || '').trim().toLowerCase() === lc);
+  if (byVal) return byVal.value;
+  const bySub = group.options.find(o => String(o.label || '').trim().toLowerCase().includes(lc)
+    || lc.includes(String(o.label || '').trim().toLowerCase()));
+  return bySub ? bySub.value : null;
+}
 const SMARTAPPLY_RE = /smartapply\.indeed\.com|indeedapply\/form/i;
 // The SmartApply interstitial (.../beta/indeedapply/applybyapplyablejobid?...) matches
 // SMARTAPPLY_RE but is NOT a form module yet — it redirects to .../beta/indeedapply/form/<module>.
@@ -142,33 +167,120 @@ async function contentFrame(page) {
 // list of required questions it could NOT answer.
 async function fillStep(frame) {
   const p = getProfile();
+  // Scan the step into (a) a flat list of SELECT/text fields, and (b) a map of radio/checkbox
+  // groups keyed by `name`, each carrying the real option labels + the group's question text.
   const scan = await frame.evaluate(() => {
-    const out = [];
+    const textOf = el => {
+      // Visible label for a control: its <label>, aria-label, placeholder, or nearest wrapping
+      // <label>/preceding text. Used both for option labels and for the group question.
+      let t = (el.labels?.[0]?.innerText || el.getAttribute('aria-label') || el.placeholder || '').trim();
+      if (t) return t;
+      const wrap = el.closest('label');
+      if (wrap) { t = (wrap.innerText || '').trim(); if (t) return t; }
+      const prev = el.previousElementSibling;
+      if (prev) { t = (prev.innerText || prev.textContent || '').trim(); if (t) return t; }
+      return '';
+    };
+    // The question a group belongs to: nearest <fieldset>'s <legend>, else a preceding heading/
+    // question-like element, else the first option's label.
+    const groupQuestion = el => {
+      const fs = el.closest('fieldset');
+      if (fs) { const lg = fs.querySelector('legend'); const t = (lg?.innerText || '').trim(); if (t) return t; }
+      let node = el.closest('[role="group"], div, section') || el.parentElement;
+      for (let i = 0; node && i < 4; i++, node = node.parentElement) {
+        const h = node.querySelector && node.querySelector('legend, h1, h2, h3, h4, label, [class*="question" i], [class*="label" i]');
+        if (h) { const t = (h.innerText || h.textContent || '').trim(); if (t && t.length > 2) return t; }
+      }
+      return '';
+    };
+
+    const fields = [];
+    const groups = {};
     for (const el of document.querySelectorAll('input,select,textarea')) {
       if (el.type === 'hidden' || el.name === 'g-recaptcha-response') continue;
-      const label = (el.labels?.[0]?.innerText || el.getAttribute('aria-label') || el.placeholder || '').trim();
-      out.push({ tag: el.tagName, type: el.type || '', name: el.name || el.id || '', label, required: el.required, value: el.value || '', checked: el.checked });
+      if (el.type === 'radio' || el.type === 'checkbox') {
+        const name = el.name || el.id || '';
+        if (!name) continue;
+        const g = groups[name] || (groups[name] = { name, type: el.type, question: '', options: [], required: false });
+        g.options.push({ value: el.value || '', label: textOf(el) || el.value || '', checked: !!el.checked });
+        if (el.required) g.required = true;
+        if (!g.question) g.question = groupQuestion(el);
+        continue;
+      }
+      fields.push({ tag: el.tagName, type: el.type || '', name: el.name || el.id || '', label: textOf(el), required: el.required, value: el.value || '', options: el.tagName === 'SELECT' ? [...el.options].map(o => (o.text || o.value || '').trim()).filter(Boolean) : [] });
     }
-    return out;
-  }).catch(() => []);
+    return { fields, groups: Object.values(groups) };
+  }).catch(() => ({ fields: [], groups: [] }));
 
   const unanswered = [];
-  for (const f of scan) {
+
+  // ── Radio / checkbox groups: pick a real option label, select by name+value with verified
+  //    click + dispatched React events, fall back to Playwright .check(), then verify .checked.
+  for (const g of scan.groups || []) {
+    const q = g.question || g.name;
+    if (!q) continue;
+    if (g.options.some(o => o.checked)) continue; // already answered (e.g. harvested/prefilled)
+    try {
+      const picked = choiceAnswer(q, g.options.map(o => o.label));
+      if (!picked) { if (g.required) { unanswered.push(q); askLater(q); } continue; }
+      const value = chooseRadioValue(g, picked);
+
+      // (a)+(b) in-frame: find input by name+value (or by matching label text), set checked and
+      // dispatch click/input/change so React's controlled state updates and Continue enables.
+      const okInFrame = await frame.evaluate(({ name, value, label }) => {
+        const esc = s => (window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/"/g, '\\"'));
+        let input = null;
+        if (value != null) input = document.querySelector(`input[name="${esc(name)}"][value="${esc(value)}"]`);
+        if (!input) {
+          const inputs = [...document.querySelectorAll(`input[name="${esc(name)}"]`)];
+          const want = String(label || '').trim().toLowerCase();
+          input = inputs.find(el => {
+            const t = (el.labels?.[0]?.innerText || el.getAttribute('aria-label') || el.closest('label')?.innerText || el.value || '').trim().toLowerCase();
+            return t === want || (want && t.includes(want));
+          }) || null;
+        }
+        if (!input) return false;
+        input.checked = true;
+        for (const ev of ['input', 'change', 'click']) input.dispatchEvent(new Event(ev, { bubbles: true }));
+        return input.checked === true;
+      }, { name: g.name, value, label: picked }).catch(() => false);
+
+      if (!okInFrame) {
+        // Playwright fallback: locator by name+value, else by label.
+        let checked = false;
+        if (value != null) {
+          try {
+            const byVal = frame.locator(`input[name="${g.name}"][value="${String(value).replace(/"/g, '\\"')}"]`).first();
+            if (await byVal.count().catch(() => 0)) { await byVal.check({ timeout: 2000 }); checked = true; }
+          } catch {}
+        }
+        if (!checked) {
+          try {
+            const re = new RegExp(String(picked).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+            await frame.getByLabel(re).first().check({ timeout: 2000 });
+          } catch {}
+        }
+      }
+
+      // Verify a required group ended with a checked option; otherwise park it.
+      const nowChecked = await frame.evaluate(name => {
+        const esc = s => (window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/"/g, '\\"'));
+        return [...document.querySelectorAll(`input[name="${esc(name)}"]`)].some(el => el.checked);
+      }, g.name).catch(() => false);
+      if (!nowChecked && g.required) { unanswered.push(q); askLater(q); }
+    } catch {}
+  }
+
+  // ── SELECT + text/number fields.
+  for (const f of scan.fields || []) {
     const q = f.label || f.name;
     if (!q) continue;
     try {
       if (f.tag === 'SELECT') {
         if (f.value) continue;
-        const a = choiceAnswer(q, []);
+        const a = choiceAnswer(q, f.options || []);
         if (a) await frame.selectOption(`[name="${f.name}"]`, { label: String(a) }).catch(() => {});
         else if (f.required) { unanswered.push(q); askLater(q); }
-      } else if (f.type === 'radio' || f.type === 'checkbox') {
-        // Radio/checkbox groups: let the engine pick an option label, click the matching control.
-        const a = choiceAnswer(q, []);
-        if (a) {
-          const opt = frame.getByLabel(new RegExp(String(a).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')).first();
-          await opt.check({ timeout: 2000 }).catch(() => {});
-        }
       } else {
         if (f.value) continue;
         const numeric = f.type === 'number' || /salary|years|experience|notice|how many|number/i.test(q);
@@ -176,6 +288,15 @@ async function fillStep(frame) {
         if (a != null && a !== '') {
           const loc = frame.locator(f.name ? `[name="${f.name}"]` : `textbox`).first();
           await loc.fill(String(a), { timeout: 2500 }).catch(() => {});
+          // SmartApply is React-controlled: dispatch input+change so the filled value registers
+          // and the Continue button enables.
+          if (f.name) {
+            await frame.evaluate(name => {
+              const esc = s => (window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/"/g, '\\"'));
+              const el = document.querySelector(`[name="${esc(name)}"]`);
+              if (el) for (const ev of ['input', 'change']) el.dispatchEvent(new Event(ev, { bubbles: true }));
+            }, f.name).catch(() => {});
+          }
         } else if (f.required) { unanswered.push(q); askLater(q); }
       }
     } catch {}
@@ -248,6 +369,35 @@ async function clickAdvance(frame) {
     }
   } catch {}
   return null;
+}
+
+// When clickAdvance() finds no ENABLED primary, check whether a DISABLED primary exists (same
+// CANON/TID/text matchers, but without the `!el.disabled` filter). This distinguishes "the
+// Continue button is there but disabled pending required answers" from "there is no button at
+// all", so the step loop can surface a clean, specific message instead of the generic error.
+async function findDisabledPrimary(frame) {
+  return await frame.evaluate(() => {
+    const SUBMIT = /submit your application|submit application|^submit$/i;
+    const CONT = /continue|review your application|^review$|^next$/i;
+    const TID = /continue-button|form-action-continue|submit|review|next/i;
+    const CANON = /^(continue-button|form-action-continue|submit-button|review-button)$/i;
+    const isCaptcha = el =>
+      el.id === 'g-recaptcha-response' ||
+      !!el.closest('.g-recaptcha, [data-testid*="recaptcha" i], iframe[src*="recaptcha" i]');
+    const textMatch = (el, re) => {
+      const own = (el.innerText || '').trim();
+      if (own && re.test(own)) return true;
+      for (const sp of el.querySelectorAll('span')) { if (re.test((sp.textContent || '').trim())) return true; }
+      return false;
+    };
+    const buttons = [...document.querySelectorAll('button, [role="button"]')].filter(el => !isCaptcha(el));
+    const match = el => {
+      const tid = el.getAttribute('data-testid') || '';
+      if (tid && (CANON.test(tid) || TID.test(tid))) return true;
+      return textMatch(el, SUBMIT) || textMatch(el, CONT);
+    };
+    return buttons.some(el => el.disabled && match(el));
+  }).catch(() => false);
 }
 
 // Confirmation can land in any frame — scan them all.
@@ -353,9 +503,21 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
 
     const advanced = await clickAdvance(frame);
     if (!advanced) {
-      // No primary button and no confirmation — either done or stuck.
+      // No ENABLED primary and no confirmation — either done, or the Continue button is present
+      // but disabled pending answers. Give the page a beat, then disambiguate.
       await SLEEP(1500);
       if (await confirmed(page)) return { ok: true, result: 'submitted', detail: 'Application submitted + confirmed', url: page.url() };
+
+      const disabledPrimary = await findDisabledPrimary(frame);
+      if (disabledPrimary) {
+        if (unanswered.length) {
+          // A required question we couldn't answer from the profile left Continue disabled →
+          // log it to the dashboard Questions tab rather than a generic error.
+          return { ok: false, result: 'needs_answers', detail: 'needs your answer: ' + unanswered.slice(0, 4).join(' | ').slice(0, 300), questions: unanswered, url: page.url() };
+        }
+        // We filled everything we could, yet Continue stayed disabled — specific + debuggable.
+        return { ok: false, result: 'error', detail: 'Continue stayed disabled after filling required answers', url: page.url() };
+      }
       return { ok: false, result: 'error', detail: 'could not find a Continue/Submit button to advance', url: page.url() };
     }
     // If we just clicked the final submit, a human-check often fires right here — the loop's next
