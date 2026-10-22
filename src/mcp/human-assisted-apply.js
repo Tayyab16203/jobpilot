@@ -15,7 +15,7 @@
 //          | 'no_apply' | 'error'   → nothing to drive / failed
 import { getContext } from '../agent/browser.js';
 import { getProfile } from '../profile.js';
-import { textAnswer, choiceAnswer } from './answers.js';
+import { textAnswer, choiceAnswer, coverText } from './answers.js';
 import { encounter, askLater } from '../evolve.js';
 
 const SLEEP = ms => new Promise(r => setTimeout(r, ms));
@@ -143,11 +143,42 @@ async function contentFrame(page) {
 async function fillStep(frame) {
   const p = getProfile();
   const scan = await frame.evaluate(() => {
+    // Read the nearest human-readable question text for an input whose <label for> is missing
+    // (SmartApply's questions/review modules render the label in a SEPARATE element, not a
+    // standard <label for>, and provide no aria-label/placeholder — so el.labels is empty).
+    // Walk up to the question container and read its label/legend/heading/own text.
+    const labelFromContainer = el => {
+      let node = el.closest('[data-testid*="question" i], fieldset, [class*="question" i], [class*="Question" i]');
+      if (!node) { node = el; for (let i = 0; i < 4 && node.parentElement; i++) node = node.parentElement; }
+      if (!node) return '';
+      const pick = sel => {
+        for (const c of node.querySelectorAll(sel)) {
+          const t = (c.innerText || c.textContent || '').trim();
+          if (t && c !== el && !c.contains(el)) return t;
+          if (t) return t;
+        }
+        return '';
+      };
+      let t = pick('label') || pick('legend') || pick('[data-testid*="label" i]') || pick('h1,h2,h3,h4');
+      if (!t) {
+        // Fall back to the container's own visible text, minus any control text.
+        t = (node.innerText || node.textContent || '').trim();
+      }
+      return t;
+    };
     const out = [];
     for (const el of document.querySelectorAll('input,select,textarea')) {
       if (el.type === 'hidden' || el.name === 'g-recaptcha-response') continue;
-      const label = (el.labels?.[0]?.innerText || el.getAttribute('aria-label') || el.placeholder || '').trim();
-      out.push({ tag: el.tagName, type: el.type || '', name: el.name || el.id || '', label, required: el.required, value: el.value || '', checked: el.checked });
+      const name = el.name || el.id || '';
+      const testid = el.getAttribute('data-testid') || '';
+      let label = (el.labels?.[0]?.innerText || el.getAttribute('aria-label') || el.placeholder || '').trim();
+      // q_<hash> SmartApply inputs: derive the question label from the surrounding container.
+      if (!label && (/^q_[0-9a-f]+$/i.test(name) || /^input-q_[0-9a-f]+-input$/i.test(testid))) {
+        label = labelFromContainer(el);
+      }
+      // Strip a trailing required-asterisk and collapse whitespace.
+      label = label.replace(/\s*\*\s*$/, '').replace(/\s+/g, ' ').trim();
+      out.push({ tag: el.tagName, type: el.type || '', name, testid, label, required: el.required, value: el.value || '', checked: el.checked });
     }
     return out;
   }).catch(() => []);
@@ -171,11 +202,48 @@ async function fillStep(frame) {
         }
       } else {
         if (f.value) continue;
+        const ql = String(q).toLowerCase();
         const numeric = f.type === 'number' || /salary|years|experience|notice|how many|number/i.test(q);
-        const a = textAnswer(q, { numeric });
+        let a = textAnswer(q, { numeric });
+        // Identity fallback from the profile when the answer engine comes up empty for a
+        // SmartApply identity field whose label only lives in the container text.
+        if (a == null || a === '') {
+          if (/full name|your name|legal name|^name\b/.test(ql)) a = p.name || '';
+          else if (/e-?mail/.test(ql)) a = p.email || '';
+          else if (/phone|mobile|contact number|whatsapp/.test(ql)) a = numeric ? (p.phone || '').replace(/\D/g, '') : (p.phone || '');
+        }
+        // Required cover-letter free-text: never leave it blank. Prefer learned/engine text,
+        // then a short profile-based cover line.
+        if ((a == null || a === '') && /cover letter/.test(ql)) {
+          a = textAnswer('cover letter', {}) || coverText(p) || '';
+        }
         if (a != null && a !== '') {
-          const loc = frame.locator(f.name ? `[name="${f.name}"]` : `textbox`).first();
-          await loc.fill(String(a), { timeout: 2500 }).catch(() => {});
+          // SmartApply's question inputs are React-controlled: a bare locator.fill() sets the DOM
+          // value but can skip React's onChange, so the component's state stays empty and the
+          // Continue button treats the required field as blank (the form never advances). Type the
+          // value as real keystrokes and blur so React registers it, then verify the value took —
+          // the module is still hydrating when it first renders, so the first attempt can no-op.
+          // Retry a few times (settling briefly) and fall back to fill() before giving up.
+          // Target the SmartApply testid first (input-<name>-input), then the name attribute.
+          const sel = f.name
+            ? `[data-testid="input-${f.name}-input"], [name="${f.name}"]`
+            : (f.testid ? `[data-testid="${f.testid}"]` : null);
+          const loc = frame.locator(sel || `textbox`).first();
+          let ok = false;
+          for (let attempt = 0; attempt < 4 && !ok; attempt++) {
+            try {
+              await loc.click({ timeout: 2500 });
+              await loc.fill('', { timeout: 2000 });
+              await loc.pressSequentially(String(a), { delay: 30, timeout: 6000 });
+              await loc.blur().catch(() => {});
+            } catch {
+              await loc.fill(String(a), { timeout: 2500 }).catch(() => {});
+            }
+            // Confirm React actually holds the value (read it back); retry if it didn't stick.
+            try { ok = String(await loc.inputValue({ timeout: 1500 })).trim() !== ''; } catch { ok = false; }
+            if (!ok) await SLEEP(800);
+          }
+          if (!ok && f.required) { unanswered.push(q); askLater(q); }
         } else if (f.required) { unanswered.push(q); askLater(q); }
       }
     } catch {}
@@ -183,35 +251,48 @@ async function fillStep(frame) {
   return unanswered;
 }
 
-// Wait for a SmartApply module's real content to mount before we fill/advance it. SmartApply
-// first paints a bare site-chrome shell (no form controls, no primary button) and then mounts the
-// module's fields + Continue/Submit asynchronously. Poll the content frame until it has a real
-// control OR a non-captcha primary action, so fillStep sees the actual fields and the Continue
-// button has rendered. Degrades gracefully: returns after timeoutMs regardless.
-async function waitForModuleContent(page, frame, { timeoutMs = 9000 } = {}) {
+// Wait for a SmartApply module's real content to mount AND settle before we fill/advance it.
+// SmartApply first paints a bare site-chrome shell (just the leftover Continue button and the
+// hidden g-recaptcha textarea), then mounts the module's real fields a beat later. If we return
+// the instant any action/control exists we scan the empty shell and never fill the questions, so
+// the form never advances. Instead poll the signature {meaningful controls, has primary action}
+// and only return once it has been STABLE across two consecutive reads (fields finished mounting)
+// — or on a terminal state / timeout. Degrades gracefully.
+async function waitForModuleContent(page, frame, { timeoutMs = 12000 } = {}) {
   const deadline = Date.now() + timeoutMs;
+  const read = () => frame.evaluate(() => {
+    // Count only MEANINGFUL fillable controls — exclude the hidden-ish g-recaptcha-response
+    // textarea and file inputs that render on the bare shell before the real inputs mount.
+    const controls = [...document.querySelectorAll('input:not([type=hidden]),select,textarea')]
+      .filter(el => el.name !== 'g-recaptcha-response' && el.type !== 'file'
+        && (el.tagName !== 'INPUT' || !['radio', 'checkbox'].includes(el.type) || el.offsetParent !== null)).length;
+    const TID = /continue-button|form-action-continue|submit|review|next/i;
+    const TXT = /submit your application|submit application|^submit$|continue|review your application|^review$|^next$/i;
+    const hasAction = [...document.querySelectorAll('button,[role="button"]')].some(el => {
+      if (el.disabled) return false;
+      if (el.id === 'g-recaptcha-response' || el.closest('.g-recaptcha, [data-testid*="recaptcha" i]')) return false;
+      const tid = el.getAttribute('data-testid') || '';
+      if (tid && TID.test(tid)) return true;
+      const own = (el.innerText || '').trim();
+      if (own && TXT.test(own)) return true;
+      for (const sp of el.querySelectorAll('span')) { if (TXT.test((sp.textContent || '').trim())) return true; }
+      return false;
+    });
+    return controls + '|' + (hasAction ? 1 : 0);
+  }).catch(() => '');
+
+  let prev = null;
   while (Date.now() < deadline) {
     // Confirmation / human-check can land here too — stop waiting and let the loop handle them.
     try { if (await confirmed(page)) return; } catch {}
     try { if (await visibleHumanCheck(page)) return; } catch {}
-    const ready = await frame.evaluate(() => {
-      const controls = document.querySelectorAll('input:not([type=hidden]):not([name="g-recaptcha-response"]),select,textarea').length;
-      const TID = /continue-button|form-action-continue|submit|review|next/i;
-      const TXT = /submit your application|submit application|^submit$|continue|review your application|^review$|^next$/i;
-      const hasAction = [...document.querySelectorAll('button,[role="button"]')].some(el => {
-        if (el.disabled) return false;
-        if (el.id === 'g-recaptcha-response' || el.closest('.g-recaptcha, [data-testid*="recaptcha" i]')) return false;
-        const tid = el.getAttribute('data-testid') || '';
-        if (tid && TID.test(tid)) return true;
-        const own = (el.innerText || '').trim();
-        if (own && TXT.test(own)) return true;
-        for (const sp of el.querySelectorAll('span')) { if (TXT.test((sp.textContent || '').trim())) return true; }
-        return false;
-      });
-      return controls > 0 || hasAction;
-    }).catch(() => false);
-    if (ready) return;
-    await SLEEP(500);
+    const sig = await read();
+    const [controls, action] = sig.split('|');
+    // Ready = some meaningful control OR a primary action, AND the signature is stable (same as
+    // the previous read) so we don't catch the module mid-mount.
+    if (sig && (Number(controls) > 0 || action === '1') && sig === prev) return;
+    prev = sig;
+    await SLEEP(600);
   }
 }
 
@@ -263,7 +344,7 @@ async function _clickAdvanceOnce(frame) {
       .filter(el => !el.disabled && !isCaptcha(el));
     // SmartApply's canonical primary action — exact testids. Prefer these over the looser regex so
     // we hit the real footer button, not a duplicate/placeholder "hp-continue-button-N".
-    const CANON = /^(continue-button|form-action-continue|submit-button|review-button)$/i;
+    const CANON = /^(continue-button|form-action-continue|submit-button|submit-application-button|review-button)$/i;
     // Prefer a final submit, then the canonical testid, then continue/review/next by testid or text.
     const pick = re =>
       clickable.find(el => { const tid = el.getAttribute('data-testid') || ''; return tid && re.test(tid); }) ||
@@ -280,7 +361,7 @@ async function _clickAdvanceOnce(frame) {
 
   // Fallback: Playwright locator click works across the real (cross-origin) form frame where an
   // in-page document.click can be unreliable.
-  for (const tid of ['form-action-continue', 'continue-button', 'submit-button']) {
+  for (const tid of ['form-action-continue', 'continue-button', 'submit-application-button', 'submit-button']) {
     try {
       const byTid = frame.getByTestId(tid).first();
       if (await byTid.count().catch(() => 0)) { await byTid.click({ timeout: 2500 }); return tid; }
@@ -405,11 +486,39 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
       return { ok: false, result: 'needs_answers', detail: 'needs your answer: ' + unanswered.slice(0, 4).join(' | ').slice(0, 300), questions: unanswered, url: page.url() };
     }
 
+    // On the review/questions module the required fields just got filled — re-check whether the
+    // canonical "Submit your application" button is now ENABLED and, if so, click it directly.
+    // If it exists but is still disabled, fall through to clickAdvance + confirmed +
+    // visibleHumanCheck handling (a genuine captcha gate still returns waiting_for_human).
+    try {
+      const submit = frame.getByTestId('submit-application-button').first();
+      if (await submit.count().catch(() => 0)) {
+        const disabled = await submit.evaluate(
+          el => el.disabled || el.getAttribute('aria-disabled') === 'true'
+        ).catch(() => true);
+        if (!disabled) { await submit.click({ timeout: 4000 }).catch(() => {}); continue; }
+      }
+    } catch {}
+
     const advanced = await clickAdvance(frame);
     if (!advanced) {
-      // No primary button and no confirmation — either done or stuck.
+      // No primary button and no confirmation — either done, gated by a human-check, or stuck.
       await SLEEP(1500);
       if (await confirmed(page)) return { ok: true, result: 'submitted', detail: 'Application submitted + confirmed', url: page.url() };
+      // SmartApply's review/submit step gates the "Submit your application" control behind a
+      // VISIBLE reCAPTCHA: the submit button is not rendered/enabled until the user solves it, so
+      // clickAdvance legitimately finds no button. That is a human-check hand-off, NOT the
+      // button-not-found bug — detect the (possibly just-rendered) visible captcha here and wait
+      // for the human, per POLICY, instead of erroring out.
+      if (await visibleHumanCheck(page)) {
+        await encounter('human_check', 'visible CAPTCHA/Cloudflare on ' + (page.url().match(/[^/]+\/\/[^/]+/) || [''])[0], { url: page.url(), page }).catch(() => {});
+        return {
+          ok: false,
+          result: 'waiting_for_human',
+          detail: '🧑 Human-check on screen (CAPTCHA/Cloudflare). Please click/solve it in the debug Chrome window, then call this tool again with resume:true to continue the application.',
+          url: page.url(),
+        };
+      }
       return { ok: false, result: 'error', detail: 'could not find a Continue/Submit button to advance', url: page.url() };
     }
     // If we just clicked the final submit, a human-check often fires right here — the loop's next
