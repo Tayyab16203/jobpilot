@@ -30,9 +30,19 @@ const STOPFILE = path.join(DATA, '.stop');
 const NO_AUTOSTART_FILE = path.join(DATA, '.no-autostart');
 const log = (...a) => console.error('[mcp-evolve] ' + a.join(' '));
 
-/** @returns {boolean} true if auto-start of the worker + background evolve loop is disabled. */
+/**
+ * @returns {boolean} true if auto-start of the worker + background evolve loop is disabled.
+ *
+ * Auto-start is now OFF BY DEFAULT. The worker never starts on its own; it starts ONLY when the
+ * user explicitly asks (via `npm run worker:data`). To restore the old always-on boot behavior,
+ * the user must opt IN with JOBPILOT_AUTOWORKER=1 (and not have the persistent kill-switch set).
+ * The env flag JOBPILOT_NO_AUTOWORKER=1 and the persistent file data/.no-autostart both force it
+ * off and override the opt-in — they can never be bypassed.
+ */
 function autoStartDisabled() {
-  return process.env.JOBPILOT_NO_AUTOWORKER === '1' || fs.existsSync(NO_AUTOSTART_FILE);
+  if (process.env.JOBPILOT_NO_AUTOWORKER === '1' || fs.existsSync(NO_AUTOSTART_FILE)) return true;
+  // Default OFF: only auto-start when the user explicitly opted in.
+  return process.env.JOBPILOT_AUTOWORKER !== '1';
 }
 
 /** @returns {boolean} true if the always-on worker is alive (heartbeat < 2 min old). */
