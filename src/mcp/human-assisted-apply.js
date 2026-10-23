@@ -458,14 +458,30 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
     page.setDefaultTimeout(15000);
     await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => {});
     await SLEEP(3500);
-    // Click the Indeed Apply button to enter SmartApply.
+    // Click the Indeed Apply button to enter SmartApply. The current Indeed UI often renders the
+    // CTA as an <a> anchor ("Apply now") whose href is the SmartApply interstitial
+    // (smartapply.indeed.com/beta/indeedapply/applybyapplyablejobid?…). An in-page b.click() on
+    // such an anchor is frequently swallowed by Indeed's SPA handler, so when we find a SmartApply
+    // href we navigate to it directly instead of relying on the click. Fall back to clicking the
+    // in-app widget button for postings that still render it.
     const entered = await page.evaluate(() => {
-      const b = document.querySelector('#indeedApplyButton, [class*="IndeedApplyButton"] button, button[aria-label*="Apply" i]')
-        || [...document.querySelectorAll('a,button')].find(x => /^apply now$|^apply$/i.test((x.innerText || '').trim()));
-      if (b) { b.click(); return true; }
-      return false;
-    }).catch(() => false);
+      const isApplyText = (t) => /^apply( now| on company site)?$/i.test((t || '').trim());
+      // 1. Prefer a SmartApply anchor and hand its href back so the driver can navigate to it.
+      const saAnchor = [...document.querySelectorAll('a[href]')].find(a =>
+        /smartapply\.indeed\.com|indeedapply\/(form|applybyapplyablejobid)/i.test(a.href)
+        && (isApplyText(a.innerText) || a.matches('.jobsearch-IndeedApplyButton-newDesign a, [class*="IndeedApplyButton"] a')));
+      if (saAnchor) return { href: saAnchor.href };
+      // 2. In-app Indeed Apply widget (button-based).
+      const btn = document.querySelector('#indeedApplyButton, [class*="IndeedApplyButton"] button, button[aria-label*="Apply" i]')
+        || [...document.querySelectorAll('a,button')].find(x => isApplyText(x.innerText));
+      if (btn) { btn.click(); return { clicked: true }; }
+      return null;
+    }).catch(() => null);
     if (!entered) return { ok: false, result: 'no_apply', detail: 'no Indeed Apply button on this posting', url: jobUrl };
+    // A SmartApply anchor is navigated to directly (more reliable than an SPA-swallowed click).
+    if (entered.href) {
+      await page.goto(entered.href, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => {});
+    }
     await SLEEP(6000);
     const sa = await findSmartApplyTab(ctx);
     if (sa) { page = sa; pageRef.page = sa; }
