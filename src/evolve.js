@@ -316,11 +316,15 @@ export function askLater(question, options = []) {
   const k = qkey(question);
   if (!k) return;
 
-  // If already answered (any source, any form), don't re-park as pending
+  // If already answered with a NON-EMPTY answer (any source), don't re-park as pending.
+  // IMPORTANT: a row with pending!=1 but an EMPTY answer means a prior learned/guessed value
+  // was cleared or never actually resolved the question — in that case we MUST re-surface it
+  // so the user can see and fill it on the dashboard (otherwise the question stays invisible
+  // forever and the apply keeps failing silently). Only a real, non-empty answer suppresses it.
   const existing = one(`SELECT pending, answer FROM answers WHERE qkey=?`, [k]);
-  if (existing && existing.pending !== 1) return;    // already answered or agent-answered
+  if (existing && existing.pending !== 1 && String(existing.answer || '').trim() !== '') return;
 
-  // Fuzzy check: if a similar question is already answered, skip parking
+  // Fuzzy check: if a similar question already has a NON-EMPTY answer, skip parking.
   for (const r of rows(`SELECT qkey FROM answers WHERE answer!='' AND pending!=1`)) {
     if (sim(k, r.qkey) >= 0.6) return;              // similar answered question exists
   }
