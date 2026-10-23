@@ -375,6 +375,20 @@ async function clickAdvance(frame) {
 // CANON/TID/text matchers, but without the `!el.disabled` filter). This distinguishes "the
 // Continue button is there but disabled pending required answers" from "there is no button at
 // all", so the step loop can surface a clean, specific message instead of the generic error.
+// Scan EVERY frame for a disabled primary. The review-module submit button lives in the top
+// SmartApply frame, which contentFrame() can score to 0 (no inputs + a disabled action) and skip,
+// so checking only the chosen content frame misses it.
+async function anyFrameDisabledPrimary(page) {
+  for (const fr of page.frames()) {
+    try {
+      let u = ''; try { u = fr.url() || ''; } catch {}
+      if (/recaptcha|hcaptcha|turnstile/i.test(u)) continue;
+      if (await findDisabledPrimary(fr)) return true;
+    } catch {}
+  }
+  return false;
+}
+
 async function findDisabledPrimary(frame) {
   return await frame.evaluate(() => {
     const SUBMIT = /submit your application|submit application|^submit$/i;
@@ -398,6 +412,21 @@ async function findDisabledPrimary(frame) {
     };
     return buttons.some(el => el.disabled && match(el));
   }).catch(() => false);
+}
+
+// A reCAPTCHA/hCaptcha/Turnstile frame is PRESENT on the page (any size), even if not yet showing
+// a visible challenge. On the SmartApply review module the "Submit your application" button stays
+// DISABLED until an (often invisible/enterprise) reCAPTCHA resolves, and the visible challenge only
+// appears after a submit attempt. When we see a disabled submit together with a captcha frame we
+// must hand off to the human rather than report a generic error — we never solve the captcha.
+async function captchaFramePresent(page) {
+  for (const fr of page.frames()) {
+    try {
+      const u = fr.url() || '';
+      if (/recaptcha|hcaptcha|turnstile|challenges\.cloudflare/i.test(u)) return true;
+    } catch {}
+  }
+  return false;
 }
 
 // Confirmation can land in any frame — scan them all.
@@ -508,15 +537,28 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
       await SLEEP(1500);
       if (await confirmed(page)) return { ok: true, result: 'submitted', detail: 'Application submitted + confirmed', url: page.url() };
 
-      const disabledPrimary = await findDisabledPrimary(frame);
+      const disabledPrimary = await anyFrameDisabledPrimary(page);
       if (disabledPrimary) {
         if (unanswered.length) {
           // A required question we couldn't answer from the profile left Continue disabled →
           // log it to the dashboard Questions tab rather than a generic error.
           return { ok: false, result: 'needs_answers', detail: 'needs your answer: ' + unanswered.slice(0, 4).join(' | ').slice(0, 300), questions: unanswered, url: page.url() };
         }
-        // We filled everything we could, yet Continue stayed disabled — specific + debuggable.
-        return { ok: false, result: 'error', detail: 'Continue stayed disabled after filling required answers', url: page.url() };
+        // Everything answered, yet the primary stayed disabled. On the SmartApply review module the
+        // "Submit your application" button is gated behind a reCAPTCHA that is often invisible until
+        // a submit attempt. If a captcha frame is present, this is a human-check hand-off, not an
+        // error — the user solves it in the Chrome window, then we resume.
+        if (await captchaFramePresent(page)) {
+          await encounter('human_check', 'reCAPTCHA-gated submit on ' + (page.url().match(/[^/]+\/\/[^/]+\/[^?]*/) || [''])[0], { url: page.url(), page }).catch(() => {});
+          return {
+            ok: false,
+            result: 'waiting_for_human',
+            detail: '🧑 The Submit button is gated by a reCAPTCHA. Please complete the "I\'m not a robot" / verification in the debug Chrome window, then call this tool again with resume:true to finish submitting.',
+            url: page.url(),
+          };
+        }
+        // No captcha and still disabled — specific + debuggable.
+        return { ok: false, result: 'error', detail: 'Primary (Continue/Submit) stayed disabled after filling required answers', url: page.url() };
       }
       return { ok: false, result: 'error', detail: 'could not find a Continue/Submit button to advance', url: page.url() };
     }
