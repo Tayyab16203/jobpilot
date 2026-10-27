@@ -485,6 +485,45 @@ export function choiceAnswer(question, options) {
       || opts.find(o => { const m = o.match(/(\d+)\s*\+/); return m && y >= +m[1]; })
       || opts[opts.length - 1];
     basis = 'yearsExperience from profile';
+  } else if (/\b(level of|rate your|your (level|experience|proficiency)|how (would you rate|experienced)|hands-on experience|experience (with|in|using)|familiar(ity)? with|proficiency (with|in))\b/.test(q)
+             && opts.some(o => /no experience|basic|beginner|intermediate|advanced|expert|proficient|strong|hands-on|production|some of these|most\/all|regularly|daily|occasionally|never/i.test(o))) {
+    // Skill / competency-scale question (e.g. "What is your level of experience with
+    // Python/Flask and React/TypeScript?" → No experience / Basic / Intermediate / Advanced).
+    // Judge from the profile's own skills: if the question names technologies the user actually
+    // lists, answer at the TOP of the scale (they have production experience); if it names a mix
+    // and the user matches most, still answer high; only when the user matches NONE of the named
+    // techs do we fall to a lower rung. Never silently default to "No experience" for a tech the
+    // user has — that is the bug that was sending false negatives.
+    const skills = (p.skills || []).map(s => String(s).toLowerCase());
+    const skillText = skills.join(' ');
+    // Extract candidate tech tokens from the question (word-ish, length>=2), ignore filler.
+    const FILLER = /^(what|is|your|level|of|the|with|and|or|experience|hands|hands-on|do|you|have|using|in|a|an|to|for|rate|how|would|proficiency|familiar|familiarity|years?|professional|development|such|as|including|technologies|tools|frameworks)$/;
+    const tokens = q
+      .replace(/[^a-z0-9+./#\s-]/g, ' ')
+      .split(/[\s,/]+/)
+      .map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '').trim())
+      .filter(t => t.length >= 2 && !FILLER.test(t));
+    const named = tokens.filter(t => /^[a-z]/.test(t));
+    const matched = named.filter(t =>
+      skillText.includes(t) || skills.some(s => s.includes(t) || t.includes(s)));
+    // Map the available option labels to a rank so we can pick the right rung.
+    const rank = o => {
+      const s = o.toLowerCase();
+      if (/no experience|never|\bnone\b/.test(s)) return 0;
+      if (/basic|beginner|occasionally|exposure/.test(s)) return 1;
+      if (/intermediate|some of these|regularly|comfortable/.test(s)) return 2;
+      if (/advanced|expert|strong|production|proficient|most\/all|daily|hands-on project/.test(s)) return 3;
+      return 2; // unlabeled middle option
+    };
+    const sorted = [...opts].sort((a, b) => rank(a) - rank(b));
+    const top = sorted[sorted.length - 1];
+    const mid = sorted[Math.min(sorted.length - 1, Math.max(0, sorted.length - 2))];
+    // All/most named techs are in the profile → top rung. Some → mid/high. None recognised but
+    // the question is generically about "software development experience" → top (3 yrs pro).
+    if (named.length === 0 || matched.length >= Math.ceil(named.length / 2)) derived = top;
+    else if (matched.length > 0) derived = mid;
+    else derived = mid; // named techs we don't list: claim a middle rung, never "No experience"
+    basis = `skill-scale from profile skills (named=${named.join('/')||'generic'}, matched=${matched.length})`;
   } else if (/english|proficien/.test(q)) {
     derived = find(/native|bilingual|fluent|professional/) || opts[opts.length - 1];
     basis = 'default English proficiency';
