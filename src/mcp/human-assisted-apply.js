@@ -131,21 +131,35 @@ async function contentFrame(page) {
     // explicitly excludes any reCAPTCHA control.
     const score = await fr.evaluate(() => {
       const controls = document.querySelectorAll('input:not([type=hidden]):not([name="g-recaptcha-response"]),select,textarea').length;
-      const TID = /continue-button|form-action-continue|^continue$|submit|review|next/i;
-      const TXT = /submit your application|submit application|^submit$|continue|review your application|^review$|^next$/i;
-      const els = [...document.querySelectorAll('button, [role="button"], [data-testid]')];
-      const hasAction = els.some(el => {
+      const TID = /continue-button|form-action-continue|^continue$|submit-application-button|submit|review|next/i;
+      const SUBMIT_TXT = /submit your application|submit application|^submit$/i;
+      const ADV_TXT = /continue|review your application|^review$|^next$/i;
+      const vis = el => { const r = el.getBoundingClientRect(); return r.width > 2 && r.height > 2; };
+      const els = [...document.querySelectorAll('button, [role="button"], [data-testid]')].filter(el => {
         if (el.disabled) return false;
         if (el.closest('.g-recaptcha, [data-testid*="recaptcha" i], iframe[src*="recaptcha" i]')) return false;
         if (el.id === 'g-recaptcha-response') return false;
-        const tid = el.getAttribute('data-testid') || '';
-        if (tid && TID.test(tid)) return true;
-        const own = (el.innerText || '').trim();
-        if (own && TXT.test(own)) return true;
-        for (const sp of el.querySelectorAll('span')) { if (TXT.test((sp.textContent || '').trim())) return true; }
-        return false;
+        return vis(el);
       });
-      return controls + (hasAction ? 1 : 0);
+      const txtHit = (el, re) => {
+        const own = (el.innerText || '').trim();
+        if (own && re.test(own)) return true;
+        for (const sp of el.querySelectorAll('span')) { if (re.test((sp.textContent || '').trim())) return true; }
+        return false;
+      };
+      // The review-module frame has ZERO input controls — just a "Submit your application"
+      // (data-testid=submit-application-button) button — so a visible submit must score strongly on
+      // its own, otherwise contentFrame prefers a sibling srcdoc summary frame that has more text
+      // but no real primary action and clickAdvance then finds nothing.
+      const hasSubmit = els.some(el => {
+        const tid = el.getAttribute('data-testid') || '';
+        return (tid && /submit-application-button|submit/i.test(tid)) || txtHit(el, SUBMIT_TXT);
+      });
+      const hasAdvance = els.some(el => {
+        const tid = el.getAttribute('data-testid') || '';
+        return (tid && TID.test(tid)) || txtHit(el, ADV_TXT);
+      });
+      return controls + (hasSubmit ? 5 : 0) + (hasAdvance ? 1 : 0);
     }).catch(() => 0);
 
     if (score > 0) candidates.push({ fr, score, isForm, depth: depthOf(fr) });
@@ -328,24 +342,43 @@ async function clickAdvance(frame) {
       for (const sp of el.querySelectorAll('span')) { if (re.test((sp.textContent || '').trim())) return true; }
       return false;
     };
+    // Is the element actually rendered? SmartApply ships OFF-SCREEN placeholder "Continue" buttons
+    // (data-testid="hp-continue-button-0..N") that are in the DOM but have a 0-size / off-viewport
+    // box; clicking one no-ops and the flow loops on the same page. The real footer button has a
+    // real box. (We cannot use offsetParent because a position:fixed footer reports null there, so
+    // we check getBoundingClientRect dimensions instead.)
+    const isVisible = el => {
+      const r = el.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) return false;
+      const st = getComputedStyle(el);
+      return st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || '1') > 0.01;
+    };
     // Only clickable controls (BUTTON / role=button), never the wrapper DIV/FIELDSET/LABEL that
     // SmartApply also tags with data-testid. A bare [data-testid] that is not a button is layout.
-    // NB: do not filter on offsetParent — SmartApply's footer Continue is position:fixed, whose
-    // offsetParent is null even though it is visible, which would wrongly exclude the real button.
     const clickable = [...document.querySelectorAll('button, [role="button"]')]
       .filter(el => !el.disabled && !isCaptcha(el));
     // SmartApply's canonical primary action — exact testids. Prefer these over the looser regex so
-    // we hit the real footer button, not a duplicate/placeholder "hp-continue-button-N".
-    const CANON = /^(continue-button|form-action-continue|submit-button|review-button)$/i;
-    // Prefer a final submit, then the canonical testid, then continue/review/next by testid or text.
-    const pick = re =>
-      clickable.find(el => { const tid = el.getAttribute('data-testid') || ''; return tid && re.test(tid); }) ||
-      clickable.find(el => textMatch(el, re));
+    // we hit the real footer button, not a duplicate/placeholder "hp-continue-button-N". The final
+    // review step's submit carries data-testid="submit-application-button".
+    const CANON = /^(continue-button|form-action-continue|submit-button|submit-application-button|review-button)$/i;
+    // The placeholder/duplicate Continue buttons SmartApply renders off-screen. Never click these.
+    const PLACEHOLDER = /^hp-continue-button-\d+$/i;
+    const notPlaceholder = el => !PLACEHOLDER.test(el.getAttribute('data-testid') || '');
+    // Prefer a VISIBLE, non-placeholder control at every tier: submit text → canonical testid →
+    // loose testid → continue/review text. On the questions module the real Continue carries a
+    // HASHED testid (not CANON/TID), so the final visible-text tier is what advances it.
+    const pickVisible = re =>
+      clickable.find(el => notPlaceholder(el) && isVisible(el) && (() => { const tid = el.getAttribute('data-testid') || ''; return tid && re.test(tid); })()) ||
+      clickable.find(el => notPlaceholder(el) && isVisible(el) && textMatch(el, re));
     const primary =
-      pick(SUBMIT) ||
-      clickable.find(el => CANON.test(el.getAttribute('data-testid') || '')) ||
-      clickable.find(el => { const tid = el.getAttribute('data-testid') || ''; return tid && TID.test(tid); }) ||
-      pick(CONT);
+      pickVisible(SUBMIT) ||
+      clickable.find(el => isVisible(el) && CANON.test(el.getAttribute('data-testid') || '')) ||
+      clickable.find(el => notPlaceholder(el) && isVisible(el) && (() => { const tid = el.getAttribute('data-testid') || ''; return tid && TID.test(tid); })()) ||
+      pickVisible(CONT) ||
+      // Last resort: keep the old non-visibility behaviour but still exclude placeholders, so we
+      // never regress on a form whose real button computes an odd box in a headless-ish context.
+      clickable.find(el => notPlaceholder(el) && CANON.test(el.getAttribute('data-testid') || '')) ||
+      clickable.find(el => notPlaceholder(el) && textMatch(el, CONT));
     if (primary) { const l = label(primary); primary.click(); return l || 'advance'; }
     return null;
   }).catch(() => null);
@@ -379,8 +412,8 @@ async function findDisabledPrimary(frame) {
   return await frame.evaluate(() => {
     const SUBMIT = /submit your application|submit application|^submit$/i;
     const CONT = /continue|review your application|^review$|^next$/i;
-    const TID = /continue-button|form-action-continue|submit|review|next/i;
-    const CANON = /^(continue-button|form-action-continue|submit-button|review-button)$/i;
+    const TID = /continue-button|form-action-continue|submit-application-button|submit|review|next/i;
+    const CANON = /^(continue-button|form-action-continue|submit-button|submit-application-button|review-button)$/i;
     const isCaptcha = el =>
       el.id === 'g-recaptcha-response' ||
       !!el.closest('.g-recaptcha, [data-testid*="recaptcha" i], iframe[src*="recaptcha" i]');
@@ -476,6 +509,11 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
   }
 
   // Walk the multi-step form. Stop and hand off the moment a VISIBLE human-check appears.
+  // Track the form-module URL across iterations: if an "advance" click does not change the module
+  // (or any field), we are clicking a dead/placeholder control and must stop re-clicking the same
+  // page rather than burn all 10 steps on it.
+  let prevModuleUrl = '';
+  let sameModuleClicks = 0;
   for (let step = 0; step < 10; step++) {
     await SLEEP(2000);
 
@@ -496,12 +534,30 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
     }
 
     const frame = await contentFrame(page);
+
+    // Module-URL stall guard: the SmartApply module is the path segment after /form/ (e.g.
+    // resume-selection-module/resume-selection, questions-module/questions/1). If our previous
+    // advance click left us on the exact same module, count it; two no-op clicks in a row means
+    // the primary control is dead/placeholder and re-clicking will only spin the loop.
+    let moduleUrl = '';
+    try { moduleUrl = (frame.url() || page.url()).split('?')[0]; } catch { moduleUrl = page.url(); }
+    if (prevModuleUrl && moduleUrl === prevModuleUrl) sameModuleClicks++; else sameModuleClicks = 0;
+
     const unanswered = await fillStep(frame);
     if (unanswered.length) {
       return { ok: false, result: 'needs_answers', detail: 'needs your answer: ' + unanswered.slice(0, 4).join(' | ').slice(0, 300), questions: unanswered, url: page.url() };
     }
 
+    // If we have already clicked advance twice on this same module with no progress and no
+    // unanswered required question, stop — a dead control, not a real wait. Surface it so the
+    // encounter is recorded for self-evolution rather than returning a vague 10-step timeout.
+    if (sameModuleClicks >= 2) {
+      await encounter('smartapply_stall', 'advance did not change module: ' + moduleUrl.replace(/^https?:\/\/[^/]+/, ''), { url: page.url(), page }).catch(() => {});
+      return { ok: false, result: 'error', detail: 'SmartApply did not advance past ' + (moduleUrl.split('/form/')[1] || moduleUrl) + ' after repeated Continue clicks (likely a dead/placeholder control)', url: page.url() };
+    }
+
     const advanced = await clickAdvance(frame);
+    prevModuleUrl = moduleUrl;
     if (!advanced) {
       // No ENABLED primary and no confirmation — either done, or the Continue button is present
       // but disabled pending answers. Give the page a beat, then disambiguate.
