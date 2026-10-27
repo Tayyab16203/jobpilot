@@ -481,9 +481,19 @@ export function choiceAnswer(question, options) {
     basis = 'yes/no resolved from workAuth + country (resolveYesNo)';
   } else if (/years/.test(q)) {
     const y = parseFloat(textAnswer('years of experience') || '0');
-    derived = opts.find(o => { const m = o.match(/(\d+)\s*[-–to]+\s*(\d+)/); return m && y >= +m[1] && y <= +m[2]; })
+    derived = opts.find(o => { const m = o.match(/(\d+)\s*[-–—to]+\s*(\d+)/); return m && y >= +m[1] && y <= +m[2]; })
+      // "Less than N years" → pick it when the user's years are below N.
+      || opts.find(o => { const m = o.toLowerCase().match(/(?:less than|under|fewer than|below|<)\s*(\d+)/); return m && y < +m[1]; })
+      // "More than N" / "N+" → pick when at or above N.
+      || opts.find(o => { const m = o.toLowerCase().match(/(?:more than|over|above|>)\s*(\d+)/); return m && y > +m[1]; })
       || opts.find(o => { const m = o.match(/(\d+)\s*\+/); return m && y >= +m[1]; })
-      || opts[opts.length - 1];
+      // No band matched: choose the option whose single number is closest to y without exceeding
+      // it, else the lowest option — never blindly the top one (that over-claimed seniority).
+      || (() => {
+        const withNum = opts.map(o => ({ o, n: (o.match(/(\d+)/) || [])[1] })).filter(x => x.n != null).map(x => ({ o: x.o, n: +x.n }));
+        const atOrBelow = withNum.filter(x => x.n <= y).sort((a, b) => b.n - a.n)[0];
+        return atOrBelow ? atOrBelow.o : (withNum.sort((a, b) => a.n - b.n)[0]?.o || opts[0]);
+      })();
     basis = 'yearsExperience from profile';
   } else if (/\b(level of|rate your|your (level|experience|proficiency)|how (would you rate|experienced)|hands-on experience|experience (with|in|using)|familiar(ity)? with|proficiency (with|in))\b/.test(q)
              && opts.some(o => /no experience|basic|beginner|intermediate|advanced|expert|proficient|strong|hands-on|production|some of these|most\/all|regularly|daily|occasionally|never/i.test(o))) {

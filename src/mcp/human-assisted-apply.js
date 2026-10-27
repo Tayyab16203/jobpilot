@@ -214,15 +214,32 @@ async function fillStep(frame) {
 
   const unanswered = [];
 
+  // Lowest-rung ("A. No experience" / "Never" / "None") label of a skill/frequency scale — a
+  // harvested answer parked here for a technology the candidate actually uses is a false negative
+  // we must correct, not preserve.
+  const isLowestRung = label => /no experience|^(a\.\s*)?none\b|^(a\.\s*)?never\b/i.test(String(label || '').trim());
+
   // ── Radio / checkbox groups: pick a real option label, select by name+value with verified
   //    click + dispatched React events, fall back to Playwright .check(), then verify .checked.
   for (const g of scan.groups || []) {
     const q = g.question || g.name;
     if (!q) continue;
-    if (g.options.some(o => o.checked)) continue; // already answered (e.g. harvested/prefilled)
+    // SmartApply marks required groups with a trailing "*" in the legend even when the individual
+    // <input required> attribute is absent — honor that so a blank required scale question is not
+    // silently left unanswered (which stalls the flow with Continue clicking but not advancing).
+    const required = g.required || /\*\s*$/.test(String(g.question || '').trim()) || /\*\s*\*/.test(String(g.question || ''));
+    const checkedOpt = g.options.find(o => o.checked);
+    if (checkedOpt) {
+      // Already answered — keep it UNLESS it is a false "No experience" for a tech the profile
+      // knows, in which case re-answer from the CV. Otherwise leave harvested/prefilled answers be.
+      if (!isLowestRung(checkedOpt.label)) continue;
+      const better = choiceAnswer(q, g.options.map(o => o.label));
+      if (!better || isLowestRung(better)) continue; // engine agrees / can't improve → leave as is
+      // fall through to re-select `better`
+    }
     try {
       const picked = choiceAnswer(q, g.options.map(o => o.label));
-      if (!picked) { if (g.required) { unanswered.push(q); askLater(q); } continue; }
+      if (!picked) { if (required) { unanswered.push(q); askLater(q); } continue; }
       const value = chooseRadioValue(g, picked);
 
       // (a)+(b) in-frame: find input by name+value (or by matching label text), set checked and
@@ -267,7 +284,7 @@ async function fillStep(frame) {
         const esc = s => (window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/"/g, '\\"'));
         return [...document.querySelectorAll(`input[name="${esc(name)}"]`)].some(el => el.checked);
       }, g.name).catch(() => false);
-      if (!nowChecked && g.required) { unanswered.push(q); askLater(q); }
+      if (!nowChecked && required) { unanswered.push(q); askLater(q); }
     } catch {}
   }
 
