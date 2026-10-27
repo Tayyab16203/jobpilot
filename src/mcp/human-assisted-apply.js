@@ -131,7 +131,7 @@ async function contentFrame(page) {
     // explicitly excludes any reCAPTCHA control.
     const score = await fr.evaluate(() => {
       const controls = document.querySelectorAll('input:not([type=hidden]):not([name="g-recaptcha-response"]),select,textarea').length;
-      const TID = /continue-button|form-action-continue|^continue$|submit|review|next/i;
+      const TID = /continue-button|form-action-continue|^continue$|submit|review|next|apply/i;
       const TXT = /submit your application|submit application|^submit$|continue|review your application|^review$|^next$/i;
       const els = [...document.querySelectorAll('button, [role="button"], [data-testid]')];
       const hasAction = els.some(el => {
@@ -142,7 +142,9 @@ async function contentFrame(page) {
         if (tid && TID.test(tid)) return true;
         const own = (el.innerText || '').trim();
         if (own && TXT.test(own)) return true;
-        for (const sp of el.querySelectorAll('span')) { if (TXT.test((sp.textContent || '').trim())) return true; }
+        // Nested text at any depth (review-module submit label is deeply nested).
+        const deep = (el.textContent || '').trim();
+        if (deep && TXT.test(deep)) return true;
         return false;
       });
       return controls + (hasAction ? 1 : 0);
@@ -310,22 +312,29 @@ async function clickAdvance(frame) {
   // and often puts the visible label on a nested <span>, so match by testid OR own/nested-span
   // text. NEVER match or click the reCAPTCHA control.
   const inPage = await frame.evaluate(() => {
-    const SUBMIT = /submit your application|submit application|^submit$/i;
+    const SUBMIT = /submit your application|submit application|^submit$|^apply$/i;
     const CONT = /continue|review your application|^review$|^next$/i;
-    const TID = /continue-button|form-action-continue|submit|review|next/i;
+    const TID = /continue-button|form-action-continue|submit|review|next|apply/i;
     const isCaptcha = el =>
       el.id === 'g-recaptcha-response' ||
       !!el.closest('.g-recaptcha, [data-testid*="recaptcha" i], iframe[src*="recaptcha" i]');
     const label = el => {
       const own = (el.innerText || '').trim();
       if (own) return own;
-      for (const sp of el.querySelectorAll('span')) { const t = (sp.textContent || '').trim(); if (t) return t; }
+      // Nested text at ANY depth (Indeed's review-module button wraps its label in nested spans).
+      const deep = (el.textContent || '').trim();
+      if (deep) return deep;
       return (el.getAttribute('aria-label') || el.getAttribute('data-testid') || '').trim();
     };
     const textMatch = (el, re) => {
       const own = (el.innerText || '').trim();
       if (own && re.test(own)) return true;
-      for (const sp of el.querySelectorAll('span')) { if (re.test((sp.textContent || '').trim())) return true; }
+      // Match nested text at ANY depth, not just direct <span> children. Indeed's review-module
+      // submit button often nests its "Submit your application" label several levels deep.
+      const deep = (el.textContent || '').trim();
+      if (deep && re.test(deep)) return true;
+      const al = (el.getAttribute('aria-label') || '').trim();
+      if (al && re.test(al)) return true;
       return false;
     };
     // Only clickable controls (BUTTON / role=button), never the wrapper DIV/FIELDSET/LABEL that
@@ -336,7 +345,7 @@ async function clickAdvance(frame) {
       .filter(el => !el.disabled && !isCaptcha(el));
     // SmartApply's canonical primary action — exact testids. Prefer these over the looser regex so
     // we hit the real footer button, not a duplicate/placeholder "hp-continue-button-N".
-    const CANON = /^(continue-button|form-action-continue|submit-button|review-button)$/i;
+    const CANON = /^(continue-button|form-action-continue|submit-button|review-button|submit-application-button|form-action-submit|smartApplySubmitButton)$/i;
     // Prefer a final submit, then the canonical testid, then continue/review/next by testid or text.
     const pick = re =>
       clickable.find(el => { const tid = el.getAttribute('data-testid') || ''; return tid && re.test(tid); }) ||
@@ -353,7 +362,7 @@ async function clickAdvance(frame) {
 
   // Fallback: Playwright locator click works across the real (cross-origin) form frame where an
   // in-page document.click can be unreliable.
-  for (const tid of ['form-action-continue', 'continue-button', 'submit-button']) {
+  for (const tid of ['form-action-submit', 'submit-application-button', 'form-action-continue', 'continue-button', 'submit-button', 'review-button']) {
     try {
       const byTid = frame.getByTestId(tid).first();
       if (await byTid.count().catch(() => 0)) { await byTid.click({ timeout: 2500 }); return tid; }
@@ -368,6 +377,18 @@ async function clickAdvance(frame) {
       return txt || 'advance';
     }
   } catch {}
+  // Last-resort: match a button by its VISIBLE text at any depth (handles review-module submit
+  // whose label is nested and whose testid we don't recognize). getByText + button role filter.
+  try {
+    const byText = frame.locator('button, [role="button"]')
+      .filter({ hasText: /submit your application|submit application|^\s*submit\s*$|review your application/i })
+      .first();
+    if (await byText.count().catch(() => 0)) {
+      const txt = (await byText.innerText().catch(() => '')).trim();
+      await byText.click({ timeout: 2500 });
+      return txt || 'submit';
+    }
+  } catch {}
   return null;
 }
 
@@ -377,17 +398,18 @@ async function clickAdvance(frame) {
 // all", so the step loop can surface a clean, specific message instead of the generic error.
 async function findDisabledPrimary(frame) {
   return await frame.evaluate(() => {
-    const SUBMIT = /submit your application|submit application|^submit$/i;
+    const SUBMIT = /submit your application|submit application|^submit$|^apply$/i;
     const CONT = /continue|review your application|^review$|^next$/i;
-    const TID = /continue-button|form-action-continue|submit|review|next/i;
-    const CANON = /^(continue-button|form-action-continue|submit-button|review-button)$/i;
+    const TID = /continue-button|form-action-continue|submit|review|next|apply/i;
+    const CANON = /^(continue-button|form-action-continue|submit-button|review-button|submit-application-button|form-action-submit|smartApplySubmitButton)$/i;
     const isCaptcha = el =>
       el.id === 'g-recaptcha-response' ||
       !!el.closest('.g-recaptcha, [data-testid*="recaptcha" i], iframe[src*="recaptcha" i]');
     const textMatch = (el, re) => {
       const own = (el.innerText || '').trim();
       if (own && re.test(own)) return true;
-      for (const sp of el.querySelectorAll('span')) { if (re.test((sp.textContent || '').trim())) return true; }
+      const deep = (el.textContent || '').trim();
+      if (deep && re.test(deep)) return true;
       return false;
     };
     const buttons = [...document.querySelectorAll('button, [role="button"]')].filter(el => !isCaptcha(el));
@@ -421,9 +443,11 @@ async function confirmed(page) {
 export async function humanAssistedApply(args) {
   let pageRef = { page: null };
   const r = await _humanAssistedApply(args, pageRef);
-  // Close the SmartApply tab on terminal outcomes to prevent tab leaks (72+ tabs choke Chrome).
-  // Keep it open ONLY when we need the user to act and then resume on the same tab.
-  if (r.result !== 'waiting_for_human' && r.result !== 'needs_answers') {
+  // Close the SmartApply tab ONLY on a clean success (submitted) — there's nothing left to do.
+  // For every non-success outcome (waiting_for_human, needs_answers, error, stuck review, no
+  // submit button, etc.) LEAVE THE TAB OPEN so the user can finish/submit the half-filled
+  // application manually. The user explicitly asked that stuck tabs never be closed.
+  if (r.result === 'submitted') {
     try { await pageRef.page?.close(); } catch {}
   }
   return r;
