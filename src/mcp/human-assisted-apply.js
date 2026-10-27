@@ -476,6 +476,11 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
   }
 
   // Walk the multi-step form. Stop and hand off the moment a VISIBLE human-check appears.
+  // Track the form-module URL across iterations: if repeated advance clicks never change the
+  // module (and no required question is unanswered), we are clicking a dead/placeholder control
+  // and must stop re-clicking the same page rather than burn all 10 steps on it.
+  let prevModuleUrl = '';
+  let sameModuleClicks = 0;
   for (let step = 0; step < 10; step++) {
     await SLEEP(2000);
 
@@ -496,12 +501,29 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
     }
 
     const frame = await contentFrame(page);
+
+    // Which SmartApply module are we on? (path after /form/, query stripped). Used for the stall
+    // guard: resume-selection-module/..., questions-module/questions/1, review-module, etc.
+    let moduleUrl = '';
+    try { moduleUrl = (frame.url() || page.url()).split('?')[0]; } catch { moduleUrl = page.url(); }
+    if (prevModuleUrl && moduleUrl === prevModuleUrl) sameModuleClicks++; else sameModuleClicks = 0;
+
     const unanswered = await fillStep(frame);
     if (unanswered.length) {
       return { ok: false, result: 'needs_answers', detail: 'needs your answer: ' + unanswered.slice(0, 4).join(' | ').slice(0, 300), questions: unanswered, url: page.url() };
     }
 
+    // Stall guard: if we have revisited this exact module 3 times with no progress and no
+    // unanswered required question, the primary control is dead/placeholder (e.g. SmartApply's
+    // off-screen hp-continue-button-N) — stop and record the encounter for self-evolution rather
+    // than returning a vague 10-step timeout.
+    if (sameModuleClicks >= 2) {
+      await encounter('smartapply_stall', 'advance did not change module: ' + moduleUrl.replace(/^https?:\/\/[^/]+/, ''), { url: page.url(), page }).catch(() => {});
+      return { ok: false, result: 'error', detail: 'SmartApply did not advance past ' + (moduleUrl.split('/form/')[1] || moduleUrl) + ' after repeated Continue clicks (likely a dead/placeholder control)', url: page.url() };
+    }
+
     const advanced = await clickAdvance(frame);
+    prevModuleUrl = moduleUrl;
     if (!advanced) {
       // No ENABLED primary and no confirmation — either done, or the Continue button is present
       // but disabled pending answers. Give the page a beat, then disambiguate.
@@ -518,6 +540,11 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
         // We filled everything we could, yet Continue stayed disabled — specific + debuggable.
         return { ok: false, result: 'error', detail: 'Continue stayed disabled after filling required answers', url: page.url() };
       }
+      // No button found yet and nothing disabled either. On SmartApply the review-module's
+      // "Submit your application" button renders a beat after the module loads, so a single miss is
+      // not terminal — let the loop retry this same module. The sameModuleClicks guard above
+      // bounds this so we never spin forever.
+      if (step < 9) continue;
       return { ok: false, result: 'error', detail: 'could not find a Continue/Submit button to advance', url: page.url() };
     }
     // If we just clicked the final submit, a human-check often fires right here — the loop's next
