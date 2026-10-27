@@ -481,6 +481,7 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
   // and must stop re-clicking the same page rather than burn all 10 steps on it.
   let prevModuleUrl = '';
   let sameModuleClicks = 0;
+  let clickedLastIter = false;
   for (let step = 0; step < 10; step++) {
     await SLEEP(2000);
 
@@ -506,29 +507,37 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
     // guard: resume-selection-module/..., questions-module/questions/1, review-module, etc.
     let moduleUrl = '';
     try { moduleUrl = (frame.url() || page.url()).split('?')[0]; } catch { moduleUrl = page.url(); }
-    if (prevModuleUrl && moduleUrl === prevModuleUrl) sameModuleClicks++; else sameModuleClicks = 0;
+    const sameAsPrev = !!prevModuleUrl && moduleUrl === prevModuleUrl;
 
     const unanswered = await fillStep(frame);
     if (unanswered.length) {
       return { ok: false, result: 'needs_answers', detail: 'needs your answer: ' + unanswered.slice(0, 4).join(' | ').slice(0, 300), questions: unanswered, url: page.url() };
     }
 
-    // Stall guard: if we have revisited this exact module 3 times with no progress and no
-    // unanswered required question, the primary control is dead/placeholder (e.g. SmartApply's
-    // off-screen hp-continue-button-N) — stop and record the encounter for self-evolution rather
-    // than returning a vague 10-step timeout.
-    if (sameModuleClicks >= 2) {
+    // Stall guard: count ONLY clicks that actually landed a button yet left us on the same module
+    // (a genuine dead/placeholder control, e.g. SmartApply's off-screen hp-continue-button-N).
+    // Revisiting the same module because the primary button has not rendered yet is NOT a stall —
+    // that is handled by the render-wait retry below. Three real no-op clicks ⇒ stop.
+    if (sameAsPrev && clickedLastIter) sameModuleClicks++; else if (!sameAsPrev) sameModuleClicks = 0;
+    if (sameModuleClicks >= 3) {
       await encounter('smartapply_stall', 'advance did not change module: ' + moduleUrl.replace(/^https?:\/\/[^/]+/, ''), { url: page.url(), page }).catch(() => {});
       return { ok: false, result: 'error', detail: 'SmartApply did not advance past ' + (moduleUrl.split('/form/')[1] || moduleUrl) + ' after repeated Continue clicks (likely a dead/placeholder control)', url: page.url() };
     }
 
     const advanced = await clickAdvance(frame);
     prevModuleUrl = moduleUrl;
+    clickedLastIter = !!advanced;
     if (!advanced) {
       // No ENABLED primary and no confirmation — either done, or the Continue button is present
-      // but disabled pending answers. Give the page a beat, then disambiguate.
-      await SLEEP(1500);
+      // but disabled pending answers, or (on review-module) the Submit button has not rendered
+      // yet. Give the page a beat, then disambiguate.
+      await SLEEP(1800);
       if (await confirmed(page)) return { ok: true, result: 'submitted', detail: 'Application submitted + confirmed', url: page.url() };
+
+      // Retry clickAdvance once after the render-wait — SmartApply's review "Submit your
+      // application" button reliably appears within a second or two of the module loading.
+      const retry = await clickAdvance(frame);
+      if (retry) { clickedLastIter = true; continue; }
 
       const disabledPrimary = await findDisabledPrimary(frame);
       if (disabledPrimary) {
@@ -540,10 +549,8 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
         // We filled everything we could, yet Continue stayed disabled — specific + debuggable.
         return { ok: false, result: 'error', detail: 'Continue stayed disabled after filling required answers', url: page.url() };
       }
-      // No button found yet and nothing disabled either. On SmartApply the review-module's
-      // "Submit your application" button renders a beat after the module loads, so a single miss is
-      // not terminal — let the loop retry this same module. The sameModuleClicks guard above
-      // bounds this so we never spin forever.
+      // Still no button and nothing disabled — keep waiting across iterations (bounded by the
+      // 10-step budget) rather than bailing on a slow render.
       if (step < 9) continue;
       return { ok: false, result: 'error', detail: 'could not find a Continue/Submit button to advance', url: page.url() };
     }

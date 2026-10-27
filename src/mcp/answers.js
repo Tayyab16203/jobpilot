@@ -86,7 +86,10 @@ function requestedCurrency(q, fallback = 'pkr') {
 }
 
 function requestedPeriod(q, fallback = 'month') {
-  return /annual|yearly|per year|per annum|\/yr|\blpa\b|\bctc\b/.test(q) ? 'year'
+  // Only treat the figure as ANNUAL when the question explicitly says so. "CTC"/"LPA" alone does
+  // NOT force annual — many markets (incl. PK) quote CTC monthly, and the user's stored figure is
+  // monthly; annualizing it silently produced a 12× wrong number (150k → 1.8M).
+  return /annual|yearly|per year|per annum|\/yr|\blpa\b/.test(q) ? 'year'
     : /hour|hourly|\/hr/.test(q) ? 'hour' : fallback;
 }
 
