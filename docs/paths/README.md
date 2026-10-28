@@ -10,4 +10,8 @@ A new page adds a `node` and a `branch` from the node you were on. A wrong hop c
 - [Indeed](indeed/path.md) — `home` to `post_apply`. Success is only the submitted sentence.
 - [Glassdoor](glassdoor/path.md) — `login` through Google, then `salaries` to `jobs`. Easy Apply is `refused`. The employer site is `company_site`.
 - [LinkedIn](linkedin/path.md) — `feed` to `posts`. A security check on `job` is `stop`.
+- [X](x/path.md) — `home` to `search` Latest, then a status post. An apply link is followed to the employer form. A reply is only for a post with no apply link and no email, and it counts when the note is on the post.
+- [Instagram](instagram/path.md) — signed-in home to a post from the last day. Read the comments first, then the bio, then a message only when the post asks. An office city with no remote line is stop. A personal chat is stop.
 - [Greenhouse](greenhouse/path.md) — follow `embed`. `careers` and `public_job` are `stop`. An empty city field is `stop`.
+- [WUR](wur/path.md) — vacancy page form. Click the privacy box, then upload the CV and letter. Success is `ub-form-submitted`.
+- [Homerun](homerun/path.md) — vacancy to `/apply`. One resume with status success, then preview. Success is step 4, “Your application has been submitted.”

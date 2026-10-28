@@ -9,7 +9,7 @@ import { getProfile, updateProfile, profileGaps } from './profile.js';
 import { cdpStatus, listTabs } from './agent/browser.js';
 import { writeDash } from './dashboard.js';
 import { openManualLoginWindow } from './mcp/chrome.js';
-import { renderBoardLoginCard } from './dashboard/partials/header.js';
+import { renderBoardLoginCard, renderSessionCheckCard } from './dashboard/partials/header.js';
 import { DASH, DATA } from './config.js';
 
 const __dir = path.dirname(fileURLToPath(import.meta.url));
@@ -125,6 +125,24 @@ const server = http.createServer(async (req, res) => {
       const opened = await openManualLoginWindow();
       return json(res, opened.ok ? 200 : 409, opened);
     }
+    // ── POST /api/session-check → real sign-in probe for X, LinkedIn, and Gmail ─
+    if (req.method === 'POST' && url.pathname === '/api/session-check') {
+      const { verifyLogins, tryGoogleSignIn } = await import('./agent/browser.js');
+      const { applyLoginResult, LOGIN_SITES } = await import('./login-ask.js');
+      const v = await verifyLogins();
+      if (v.detail?.error && !v.x && !v.linkedin && !v.gmail) {
+        return json(res, 200, { ok: false, error: v.detail.error, x: false, linkedin: false, gmail: false });
+      }
+      const out = { x: !!v.x, linkedin: !!v.linkedin, gmail: !!v.gmail };
+      for (const site of ['x', 'linkedin', 'gmail']) {
+        if (out[site]) { applyLoginResult(site, 'ok', 'ok'); continue; }
+        const google = await tryGoogleSignIn(site, LOGIN_SITES[site][1]);
+        if (google.google === 'ok') out[site] = true;
+        applyLoginResult(site, 'fail', google.google, google.why);
+      }
+      try { writeDash(); } catch {}
+      return json(res, 200, { ok: true, ...out });
+    }
     // ── POST /api/consent → user opts in/out of auto-contribution (code/doc push) ──
     // NOTE: brain control is NOT consent-gated (it is always-on, core behavior). The only consent
     // here is autoContribute — whether code/doc fixes are pushed to GitHub.
@@ -164,6 +182,14 @@ const server = http.createServer(async (req, res) => {
       // parked question is actually cleared (no re-keying, no duplicate row).
       if (body.qkey) answerByKey(body.qkey, body.answer, 'user');
       else learn(body.question, body.answer, 'user');
+      return json(res, 200, { ok: true });
+    }
+
+    // ── POST /api/strategy-note → human marks a platform step works or wrong ─
+    if (req.method === 'POST' && url.pathname === '/api/strategy-note') {
+      const { saveStrategyNote } = await import('./strategies.js');
+      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      if (!saveStrategyNote(body.id, body.verdict, body.note)) return json(res, 400, { ok: false, error: 'unknown strategy' });
       return json(res, 200, { ok: true });
     }
 
@@ -217,9 +243,21 @@ input:focus,textarea:focus{outline:none;border-color:#6366f1}
 .boardlogin .opt{background:#1e293b;color:#e2e8f0;border:1px solid #3b82f6;border-radius:6px;padding:6px 12px;cursor:pointer;font-weight:600}
 </style></head><body><div class="wrap">
 <h1>🤖 Job Agent — Setup</h1>
-<div class="sub">Upload your CV and paste your links. Everything stays on your machine.</div>
+<div class="sub">Upload your CV and paste your links. Everything stays on your machine. This is the only sign-in: LinkedIn, Gmail, X, and Instagram in the debug window, then Glassdoor with Google, then Indeed with that same Google account.</div>
+${renderSessionCheckCard()}
 ${renderBoardLoginCard(false)}
 <script>
+async function testSessions(){
+  const el = document.getElementById('sessionStatus');
+  if (el) el.textContent = 'Testing X, LinkedIn, and Gmail…';
+  try {
+    const r = await fetch('/api/session-check', { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok || j.ok === false) throw new Error(j.error || 'test failed');
+    const bit = (name, on) => name + (on ? ' signed in' : ' signed out');
+    if (el) el.textContent = [bit('X', j.x), bit('LinkedIn', j.linkedin), bit('Gmail', j.gmail)].join(' · ');
+  } catch (e) { if (el) el.textContent = e.message; }
+}
 async function openBoardLogin(){
   const el = document.getElementById('boardLoginStatus');
   if (el) el.textContent = 'Opening Glassdoor…';
@@ -348,7 +386,10 @@ async function openBoardLogin(){
 <script>
 const $ = id => document.getElementById(id);
 const drop = $('drop'), cv = $('cv');
-drop.onclick = () => cv.click();
+// The file input lives inside the drop zone. A second click from the bubbling
+// synthetic event closes the dialog immediately, so stop it on the input.
+cv.addEventListener('click', e => e.stopPropagation());
+drop.addEventListener('click', () => cv.click());
 drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
 drop.ondragleave = () => drop.classList.remove('over');
 drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files[0]) uploadCV(e.dataTransfer.files[0]); };
@@ -367,7 +408,7 @@ $('save').onclick = async () => {
   $('answers').value.split('\\n').forEach(line => { const i = line.indexOf('='); if (i > 0) answers[line.slice(0, i).trim()] = line.slice(i + 1).trim(); });
   if ($('notice').value.trim()) answers['notice period'] = $('notice').value.trim();
   const parseMoney = raw => {
-    const m = raw.trim().match(/^([A-Za-z]{3})?\s*([\d,]+)(?:\s*(?:-|–|to)\s*([\d,]+))?\s*(?:\/\s*(month|year|hour))?$/i);
+    const m = raw.trim().match(/^([A-Za-z]{3})?\\s*([\\d,]+)(?:\\s*(?:-|–|to)\\s*([\\d,]+))?\\s*(?:\\/\\s*(month|year|hour))?$/i);
     if (!m) return null;
     const min = parseInt(m[2].replace(/,/g, ''), 10);
     const max = parseInt((m[3] || m[2]).replace(/,/g, ''), 10);

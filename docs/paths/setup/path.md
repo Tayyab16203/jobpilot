@@ -11,7 +11,7 @@ node fresh
 
 node deps
   see: node_modules is missing a JobPilot dependency
-  branch reached | npm install, which start.js and npm run agent also run | worker
+  branch reached | npm install, tell the human to leave it running, then wait | worker
   branch retry | npm install failed | deps
 
 node worker
@@ -24,7 +24,7 @@ node connect
 
 node onboard
   see: onboard_status reports profileGaps
-  branch reached | open_onboarding and give that URL | wait
+  branch reached | open the browser once, open_onboarding, user signs in on every platform | wait
   branch stop | search, email, apply, connect, or DM | onboard
 
 node wait

@@ -522,10 +522,23 @@ export async function connect({ profileUrl, posterName, role, company, withNote 
     // The 2026 LinkedIn UI dropped data-test-modal-id; check for any visible role=dialog instead.
     const dialogClosed = (await page.locator('div[role="dialog"]:visible, dialog[open]:visible').count().catch(() => 1)) === 0;
     const pending = !!(await mainCol(page, /^pending$/i)) || /invitation sent|pending/i.test(txt.slice(0, 3000)) || dialogClosed;
+    if (pending) {
+      await page.close();
+      return { ok: true, result: usedNote ? 'connected' : 'connected_no_note', detail: usedNote ? 'invite + note sent' : 'invite sent (note quota likely exhausted)', note: usedNote ? note : '' };
+    }
+    // Send was clicked but no Pending/sent signal appeared and the dialog stayed open. On
+    // follow-primary profiles (often 3rd-degree, where Connect is buried under More and an invite
+    // to a distant member is restricted), the click lands on a dead flow. Previously this returned
+    // a bare error with NO encounter, so self-evolution never learned from it. Record an encounter
+    // so the blocker is tracked, and report a clearer detail including whether the profile is
+    // follow-primary.
+    const followPrimary = !!(await mainCol(page, /^follow /i));
+    const detail = followPrimary
+      ? 'no Pending after send (follow-primary / likely 3rd-degree profile — Connect restricted)'
+      : 'no Pending state after send';
+    await encounter('connect', followPrimary ? 'no Pending after send on follow-primary profile' : 'no Pending state after send', { url: profileUrl, page }).catch(() => {});
     await page.close();
-    return pending
-      ? { ok: true, result: usedNote ? 'connected' : 'connected_no_note', detail: usedNote ? 'invite + note sent' : 'invite sent (note quota likely exhausted)', note: usedNote ? note : '' }
-      : { ok: false, result: 'error', detail: 'no Pending state after send' };
+    return { ok: false, result: 'error', detail };
   } catch (e) {
     await encounter('connect', 'exception: ' + e.message.split('\n')[0], { url: profileUrl, page }).catch(() => {});
     await page.close().catch(() => {});

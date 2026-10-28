@@ -24,7 +24,7 @@ export function body(job, profile = getProfile()) {
   const first = clean(job.posterName || job.poster_name).split(' ')[0];
   const hi = first && /^[A-Z][a-z]{1,15}$/.test(first) ? `Hi ${first},` : 'Hi,';
   const co = clean(job.company);
-  const where = job.source?.startsWith('linkedin') ? 'your LinkedIn post' : job.source === 'hn_hiring' ? 'your HN "Who is hiring" post' : job.source?.startsWith('reddit') ? 'your Reddit post' : 'the listing';
+  const where = job.source?.startsWith('linkedin') ? 'your LinkedIn post' : job.source === 'x_post' ? 'your post on X' : job.source === 'hn_hiring' ? 'your HN "Who is hiring" post' : job.source?.startsWith('reddit') ? 'your Reddit post' : 'the listing';
 
   const projects = [...(profile.projects || [])].map(p => {
     const words = `${p.name} ${p.blurb}`.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 2);

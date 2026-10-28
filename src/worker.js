@@ -13,7 +13,7 @@ import { launchChrome } from './mcp/chrome.js';
 import { verifyLogins } from './agent/browser.js';
 import { initDB, upsertJobs, setStatus, setFields, bumpAttempt, logEmail, log, getJob,
   alreadyEmailed, alreadyApplied, alreadyConnected, logConnect, rows, doneToday, isFakeEmail } from './tracker.js';
-import { liPosts, liJobs, hnHiring, publicBoards, relToIso } from './mcp/sources.js';
+import { liPosts, liJobs, hnHiring, publicBoards, xPosts, relToIso } from './mcp/sources.js';
 import { easyApply } from './mcp/easyapply.js';
 import { applyForm } from './mcp/forms.js';
 import { connect } from './mcp/connect.js';
@@ -23,6 +23,7 @@ import { subject as mkSubject, body as mkBody } from './scraper/email_content.js
 import { writeDash } from './dashboard.js';
 import { startServer } from './server.js';
 import { getProfile, isExcludedCompany, isOnboarded } from './profile.js';
+import { outreachMix } from './mix.js';
 import { outcome, rankByUCB, learnedSkip, writePlaybook, domainOf, encounter } from './evolve.js';
 import { buildQueries, buildListingQueries } from './mcp/queries.js';
 import { DATA } from './config.js';
@@ -270,6 +271,23 @@ async function scout() {
     try {
       const postQ = rankByUCB('post_query', buildQueries({ limit: 30 }));
       const jobQ = rankByUCB('job_query', buildListingQueries({ limit: 18 }));
+
+      // X hiring posts run at the start of the loop. The Where-to-look slider is the share;
+      // a zero share skips the search. LinkedIn used to occupy the only Chrome window for
+      // the whole loop, so a non-zero X share never reached the dashboard.
+      const xShare = outreachMix(getProfile().preferences).sources.x || 0;
+      if (xShare > 0 && !loginBackoff('X')) {
+        const q = postQ[0] || 'hiring software engineer remote';
+        beat('scout', `X posts: ${q}`);
+        try {
+          const xr = await xPosts(q);
+          if (xr.ok) { const { n, email } = ingest(xr.leads); say('scout', `X "${q}" +${n} (${email} email)`); clearLogin('X'); }
+          else if (notLoggedIn(xr.detail)) flagLogin('X', 'Please log into X in the JobPilot Chrome window — scraping is paused until you do');
+          else say('scout', 'X ' + (xr.detail || 'no result').slice(0, 80));
+        } catch (e) { say('scout', 'X err ' + (e.message || '').slice(0, 60)); }
+        await jitter(PACE.scout);
+        if (!running()) break;
+      }
 
       // 1) LinkedIn hiring POSTS — primary source (highest email yield), every loop.
       //    Skipped while LinkedIn needs a login (banner shown); re-probed every ~3 min.

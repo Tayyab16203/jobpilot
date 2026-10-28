@@ -137,9 +137,9 @@ export async function newPage(timeout = 30000) {
 
 // Verify a REAL logged-in session by navigating and reading auth signals —
 // not by checking whether a tab happens to be open (a fresh profile has none).
-// Returns { linkedin: bool, gmail: bool, detail: {...} }.
+// Returns { x: bool, linkedin: bool, gmail: bool, detail: {...} }.
 export async function verifyLogins() {
-  const out = { linkedin: false, gmail: false, detail: {} };
+  const out = { x: false, linkedin: false, gmail: false, detail: {} };
   let page;
   try {
     page = await newPage(35000);
@@ -147,6 +147,25 @@ export async function verifyLogins() {
     out.detail.error = e.message;
     return out;
   }
+  // X: the signed-in home has the composer and the account switcher.
+  // A login or signup URL, or a Sign in control, is logged out.
+  try {
+    await page.goto('https://x.com/home', { waitUntil: 'domcontentloaded', timeout: 35000 });
+    await page.waitForTimeout(2500);
+    const x = await page.evaluate(() => {
+      const path = location.pathname;
+      if (/\/i\/flow\/login|\/login|\/i\/flow\/signup/.test(path)) return { in: false, why: 'login url' };
+      const account = !!document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]');
+      const composer = !!document.querySelector('[data-testid="SideNav_NewTweet_Button"]');
+      const homeTab = !!document.querySelector('[data-testid="AppTabBar_Home_Link"]');
+      const signIn = !!document.querySelector('[data-testid="loginButton"], a[href="/login"]');
+      const inn = (account || composer || homeTab) && !signIn;
+      return { in: inn, why: inn ? 'home nav present' : 'no auth signal' };
+    });
+    out.x = x.in;
+    out.detail.x = x.why;
+  } catch (e) { out.detail.x = 'error: ' + e.message; }
+
   // LinkedIn: authenticated feed shows the member nav (Home/Jobs/Messaging/Me)
   // and the member's own name. authwall/login URL = logged out.
   try {
@@ -175,6 +194,58 @@ export async function verifyLogins() {
 
   await page.close().catch(() => {});
   return out;
+}
+
+export function isGoogleSignInLabel(text) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  return /google/i.test(t) && /sign in|sign up|continue|log in/i.test(t);
+}
+
+export function signedInUrl(site, url) {
+  const u = String(url || '');
+  if (/accounts\.google\.com|challenge|captcha/i.test(u)) return false;
+  if (site === 'x') return /:\/\/(x|twitter)\.com\/home/.test(u);
+  if (site === 'linkedin') return /linkedin\.com\/feed/.test(u);
+  if (site === 'gmail') return /mail\.google\.com\/mail/.test(u);
+  return false;
+}
+
+async function closeIfExtra(page) {
+  try { if (page.context().pages().length > 1) await page.close(); } catch {}
+}
+
+// One Google attempt on the site login page. Does not type a password or solve a check.
+// A failed page stays open so the person can sign in. The browser connection is left open.
+export async function tryGoogleSignIn(site, loginUrl) {
+  const status = await cdpStatus();
+  if (!status.ok) return { google: 'fail', why: 'Chrome is not open' };
+  let page;
+  try {
+    const browser = await chromium.connectOverCDP(status.wsUrl || CDP, { timeout: 20000, noDefaults: true });
+    const ctx = browser.contexts()[0];
+    if (!ctx) return { google: 'fail', why: 'Chrome has no window' };
+    page = await ctx.newPage();
+    page.setDefaultTimeout(30000);
+    await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(1500);
+    if (signedInUrl(site, page.url())) { await closeIfExtra(page); return { google: 'ok', why: 'already signed in' }; }
+    if (site === 'gmail') return { google: 'fail', why: 'Google still needs you' };
+    const clicked = await page.evaluate(() => {
+      const el = [...document.querySelectorAll('button, a, [role="button"]')].find(n => {
+        const t = (n.innerText || n.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+        return /google/i.test(t) && /sign in|sign up|continue|log in/i.test(t);
+      });
+      if (!el) return false;
+      el.click();
+      return true;
+    });
+    await page.waitForTimeout(2500);
+    if (signedInUrl(site, page.url())) { await closeIfExtra(page); return { google: 'ok', why: 'Google signed in' }; }
+    return { google: 'fail', why: clicked ? 'Google needs you' : 'no Google button' };
+  } catch (e) {
+    if (page) await closeIfExtra(page);
+    return { google: 'fail', why: String(e.message || e).slice(0, 120) };
+  }
 }
 
 export async function listTabs() {

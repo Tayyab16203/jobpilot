@@ -20,6 +20,44 @@ function ans(p, key, dflt = '') {
   return a[key] != null && a[key] !== '' ? String(a[key]) : dflt;
 }
 
+// Public general-post-office codes. Used only when preferences.adaptFields is on
+// and the profile has no postal code of its own.
+const CITY_ADMIN = {
+  karachi: { postal: '75500', province: 'Sindh' },
+  lahore: { postal: '54000', province: 'Punjab' },
+  islamabad: { postal: '44000', province: 'Islamabad' },
+  rawalpindi: { postal: '46000', province: 'Punjab' },
+};
+
+export function adaptFieldsEnabled(profile = {}) {
+  return profile?.preferences?.adaptFields === true;
+}
+
+function profileCity(profile = {}) {
+  return String(profile.location || '').split(',')[0].trim().toLowerCase();
+}
+
+function isPostalQuestion(q) {
+  return q.length <= 40 && /\b(postal code|postcode|post code|zip code|zipcode|postal|zip)\b/.test(q);
+}
+
+function isProvinceQuestion(q) {
+  if (q.length > 40) return false;
+  if (/\b(province|county)\b/.test(q)) return true;
+  return /\bstate\b/.test(q) && !/united states|statement|state your|state the|solid state/.test(q);
+}
+
+/** Postal code or province adapted from the profile city. Null when the switch is off or the city is unknown. */
+export function adaptedField(question, profile = {}) {
+  if (!adaptFieldsEnabled(profile)) return null;
+  const q = String(question || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const row = CITY_ADMIN[profileCity(profile)];
+  if (!q || !row) return null;
+  if (isPostalQuestion(q)) return row.postal;
+  if (isProvinceQuestion(q)) return row.province;
+  return null;
+}
+
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -257,6 +295,12 @@ export function textAnswer(question, { numeric = false } = {}) {
     return derived;
   }
 
+  const adapted = adaptedField(question, p);
+  if (adapted) {
+    recordAgentAnswer(question, adapted, 'city-adapted field because adaptFields is on');
+    return adapted;
+  }
+
   // Last resort for OPEN-ENDED free-text screening questions (non-numeric only).
   // Rather than parking a genuine, relevant application as needs_answers because the
   // question is open-ended ("how have you...", "describe...", "list the tools...",
@@ -407,6 +451,16 @@ export function choiceAnswer(question, options) {
     const m = opts.find(o => o.toLowerCase() === learned.toLowerCase())
       || opts.find(o => o.toLowerCase().startsWith(learned.toLowerCase()));
     if (m) { usedAnswer(question); return m; }
+  }
+
+  const adapted = adaptedField(question, p);
+  if (adapted) {
+    const m = opts.find(o => o.toLowerCase() === adapted.toLowerCase())
+      || opts.find(o => o.toLowerCase().includes(adapted.toLowerCase()));
+    if (m) {
+      recordAgentAnswer(question, m, 'city-adapted choice because adaptFields is on');
+      return m;
+    }
   }
 
   const yes = find(/^yes\b/), no = find(/^no\b/);

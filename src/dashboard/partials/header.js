@@ -46,6 +46,23 @@ export function renderLoginBanners(loginNeeded = {}) {
   ).join('');
 }
 
+export function renderLoginAsks(asks = []) {
+  if (!asks.length) return '';
+  const rows = asks.map(a => {
+    const tried = a.how === 'google'
+      ? 'I tried Google sign-in. It still needs you.'
+      : a.how === 'normal'
+        ? 'I tried the login page, then Google in the normal window. Both failed.'
+        : 'I tried the login page, then Google. Both failed.';
+    const open = a.how === 'normal'
+      ? `<button type="button" class="loginbtn" onclick="openBoardLogin()">Open Glassdoor and log in</button>`
+      : `<a class="loginbtn" href="${esc(a.url)}" target="_blank" rel="noopener">Open ${esc(a.label)} and log in</a>`;
+    const detail = a.detail ? `<div class="dim">${esc(a.detail)}</div>` : '';
+    return `<div class="loginask-row"><b>${esc(a.label)} needs you to log in.</b> ${tried} Please sign in on that window. I will keep trying there. ${open}${detail}</div>`;
+  }).join('');
+  return `<div class="loginask" id="login-ask"><b>Sign in so I can keep going.</b>${rows}</div>`;
+}
+
 /**
  * Render the self-contribution consent toggle bar.
  * @param {boolean} autoContribute - current consent state
@@ -55,6 +72,18 @@ export function renderConsentBar(autoContribute) {
   return autoContribute
     ? `<div class="consentbar">🧬 <b>Self-contribution: ON.</b> JobPilot may file blocker issues and push <i>code/doc</i> improvements to the public repo (never your data). <button class="cbtn off" onclick="consent(false)">Turn off</button></div>`
     : `<div class="consentbar">🧬 <b>Self-contribution: OFF.</b> JobPilot keeps every improvement local. Opt in to let it file issues &amp; push <i>code/doc</i> fixes back (hard-guarded — never your data/creds). <button class="cbtn on" onclick="consent(true)">Enable contributing back</button></div>`;
+}
+
+/**
+ * Tailored-CV approval at the top of the dashboard, beside the other start toggles.
+ * Drafts only reorder facts already in the profile. The CV report shows status only.
+ * @param {boolean} allowTailoredCv
+ * @returns {string} HTML
+ */
+export function renderTailoredCvBar(allowTailoredCv) {
+  return allowTailoredCv
+    ? `<div class="consentbar" id="tailored-cv-bar">📄 <b>Tailored CV: ON.</b> Drafts may reorder facts already in your profile. The canonical CV stays the source of truth. <button class="cbtn off" onclick="tailoredConsent(false)">Disable tailored uploads</button></div>`
+    : `<div class="consentbar" id="tailored-cv-bar">📄 <b>Tailored CV: OFF.</b> Applications use your canonical CV until you approve drafts here. <button class="cbtn on" onclick="tailoredConsent(true)">Approve tailored CV drafts</button></div>`;
 }
 
 /**
@@ -83,6 +112,20 @@ export function renderBrainLoopBar(brain = {}, installed = []) {
  * @param {boolean} live - worker heartbeat is fresh
  * @returns {string} HTML
  */
+/**
+ * Card that asks the debug Chrome whether X, LinkedIn, and Gmail are signed in.
+ * The button calls testSessions(), which posts to /api/session-check.
+ * @returns {string} HTML
+ */
+export function renderSessionCheckCard() {
+  return `<div class="boardlogin" id="session-check">
+  <b>Test X, LinkedIn, and Gmail.</b>
+  <p class="dim">This opens each site in the debug Chrome and reads the signed-in page. An open x.com tab is not treated as proof.</p>
+  <button class="opt" type="button" onclick="testSessions()">Test sign-in</button>
+  <span id="sessionStatus" class="dim"></span>
+</div>`;
+}
+
 export function renderBoardLoginCard(live) {
   return `<div class="boardlogin" id="board-login">
   <b>Sign in to Glassdoor, then Indeed.</b>

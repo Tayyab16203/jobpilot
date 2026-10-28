@@ -25,9 +25,8 @@ export function renderCvTab({ jobs = [], answers = [], allowTailoredCv = false, 
   return `<div class="cvguard">
     <h2 style="margin-top:0">📄 Canonical CV + optional tailoring</h2>
     <p><b>Source of truth:</b> ${esc(cvPath || 'No CV configured')}</p>
-    <p class="dim">JobPilot records a match and drift percentage for every lead. A tailored draft can only reorder facts already in your profile/CV; it cannot add qualifications. It stays disabled until you explicitly approve it here.</p>
-    <p style="margin-top:8px"><b>Tailored CV upload:</b> ${allowTailoredCv ? '<span class="ok">approved</span>' : '<span class="warn">not approved</span>'}
-      <button class="cbtn ${allowTailoredCv ? 'off' : 'on'}" onclick="tailoredConsent(${!allowTailoredCv})">${allowTailoredCv ? 'Disable tailored uploads' : 'Approve tailored CV drafts/uploads'}</button></p>
+    <p class="dim">JobPilot records a match and drift percentage for every lead. A tailored draft can only reorder facts already in your profile/CV; it cannot add qualifications. Turn drafts on or off with the Tailored CV control at the top of this page.</p>
+    <p style="margin-top:8px"><b>Tailored CV upload:</b> ${allowTailoredCv ? '<span class="ok">approved</span>' : '<span class="warn">not approved</span>'}</p>
   </div>
   <h2>CV match and drift by job</h2>
   ${table('cv_jobs', ['Role / company', 'Match', 'Drift', 'Terms not evidenced', 'Selected CV', 'Tailoring'], jobRows, 'No CV assessments yet')}

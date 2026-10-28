@@ -24,8 +24,11 @@ import { dashStyles } from './styles.js';
 import {
   renderHeader,
   renderLoginBanners,
+  renderLoginAsks,
   renderBoardLoginCard,
+  renderSessionCheckCard,
   renderConsentBar,
+  renderTailoredCvBar,
   renderBrainLoopBar,
   renderQuestionsBanner,
 } from './partials/header.js';
@@ -42,6 +45,9 @@ import {
 } from './partials/tables.js';
 import { renderQuestionsTab, renderEvolutionTab } from './partials/evolution.js';
 import { readPathTraces, renderPathsTab } from './partials/paths.js';
+import { renderStrategiesTab } from './partials/strategies.js';
+import { listStrategies } from '../strategies.js';
+import { listLoginAsks } from '../login-ask.js';
 import { renderCvTab } from './partials/cv.js';
 import { dashScripts } from './partials/clientscripts.js';
 import { esc, STATUS, badge } from './helpers.js';
@@ -127,6 +133,7 @@ export function writeDash() {
   try { learned      = q(`SELECT * FROM answers WHERE pending=0 AND answer!='' ORDER BY uses DESC, updated_at DESC LIMIT 100`); } catch {}
   try { audits       = evolutionAudits(120); } catch {}
   const traces = readPathTraces();
+  const strategies = listStrategies();
   const hopCount = traces.reduce((n, t) => n + t.hops.length, 0);
   let cvJobs = [], answerReport = [];
   try { cvJobs = q(`SELECT role, company, cv_match_percent, cv_drift_percent, cv_missing_terms, tailor_status, selected_cv_id, selected_cv_reason FROM jobs ORDER BY id DESC LIMIT 120`); } catch {}
@@ -153,9 +160,12 @@ ${renderHeader({ name: p.name, live, state, hbAge, totalJobs: tot.jobs, UIPORT }
 
 <div class="wrap">
 
+  ${renderLoginAsks(listLoginAsks())}
   ${renderLoginBanners(state.loginNeeded)}
+  ${renderSessionCheckCard()}
   ${renderBoardLoginCard(live)}
   ${renderConsentBar(p.consent?.autoContribute !== false)}
+  ${renderTailoredCvBar(p.preferences?.allowTailoredCv === true)}
   ${renderBrainLoopBar(brainState, installedBrains)}
   ${renderQuestionsBanner(pend.length)}
 
@@ -177,6 +187,7 @@ ${renderHeader({ name: p.name, live, state, hbAge, totalJobs: tot.jobs, UIPORT }
     <button id="b-cv"         onclick="switchTab('cv')">📄 CV report</button>
     <button id="b-evolution"  onclick="switchTab('evolution')">🧬 Evolution (${enc.length})</button>
     <button id="b-paths"      onclick="switchTab('paths')">🧭 Paths (${hopCount})</button>
+    <button id="b-strategies" onclick="switchTab('strategies')">🎯 Strategies</button>
     <button id="b-sent"       onclick="switchTab('sent')">📤 Emails sent</button>
     <button id="b-conns"      onclick="switchTab('conns')">🤝 Connects</button>
     <button id="b-bank"       onclick="switchTab('bank')">🗃 All leads</button>
@@ -208,6 +219,9 @@ ${renderHeader({ name: p.name, live, state, hbAge, totalJobs: tot.jobs, UIPORT }
   <div class="pane" id="p-paths">
     <p class="dim" style="margin:8px 0">Decision trees from <b>docs/paths</b>. Green is success. Blue is reached. Red is stop or refused. Follow green and blue. Do not take a red branch.</p>
     ${renderPathsTab(traces)}
+  </div>
+  <div class="pane" id="p-strategies">
+    ${renderStrategiesTab(strategies)}
   </div>
   <div class="pane" id="p-sent">${renderEmailLogTable(emails)}</div>
   <div class="pane" id="p-conns">${renderConnectsTable(conns)}</div>

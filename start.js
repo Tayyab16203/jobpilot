@@ -20,12 +20,13 @@ function ensureDeps() {
   const need = ['@modelcontextprotocol/sdk', 'playwright', 'sql.js', 'node-fetch'];
   const missing = need.filter(d => !fs.existsSync(path.join(__dir, 'node_modules', d)));
   if (!missing.length) return;
-  log(`Installing dependencies (first run): ${missing.join(', ')} …`);
+  log('FIRST RUN: installing dependencies. Leave this process open until it finishes. Do not open the browser yet.');
+  log(`Missing: ${missing.join(', ')}`);
   const r = spawnSync('npm', ['install', '--no-audit', '--no-fund'], {
     cwd: __dir, stdio: ['ignore', 'inherit', 'inherit'], shell: true,
   });
   if (r.status !== 0) { log('npm install failed'); process.exit(1); }
-  log('Dependencies installed.');
+  log('Dependencies installed. The browser opens once, on first onboard, for sign-in.');
 }
 
 // ── 2. Chrome debug port ──────────────────────────────────────────────────────

@@ -2,14 +2,24 @@
 
 # JobPilot
 
-### A brain on top. Tools underneath. A system that rewrites itself when it gets stuck.
+### One brain. Six doors. A hunt that learns the lock.
 
-Your coding agent is the brain. JobPilot has no model of its own. It is the MCP tool server,
-the browser hands, the dedup memory, and the loop that turns a stuck page into a fix on GitHub.
+You point a coding agent at this folder. That agent is the brain. JobPilot is the body: your browser, a memory that never asks twice, and a loop that turns a stuck page into a fix on GitHub. There is no model hiding in here.
 
-**Stable release: [v3.2.0](https://github.com/maazbin/jobpilot/releases/tag/v3.2.0).** Indeed Apply now works in the normal signed-in window.
+<p align="center">
+<img alt="LinkedIn" src="https://img.shields.io/badge/LinkedIn-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white">
+<img alt="Indeed" src="https://img.shields.io/badge/Indeed-003A9B?style=for-the-badge&logo=indeed&logoColor=white">
+<img alt="Glassdoor" src="https://img.shields.io/badge/Glassdoor-0CAA41?style=for-the-badge&logo=glassdoor&logoColor=white">
+<img alt="X" src="https://img.shields.io/badge/X-111111?style=for-the-badge&logo=x&logoColor=white">
+<img alt="Instagram" src="https://img.shields.io/badge/Instagram-E4405F?style=for-the-badge&logo=instagram&logoColor=white">
+<img alt="Gmail" src="https://img.shields.io/badge/Gmail-EA4335?style=for-the-badge&logo=gmail&logoColor=white">
+</p>
 
-[![Stable](https://img.shields.io/badge/release-v3.2.0-22c55e.svg)](https://github.com/maazbin/jobpilot/releases/tag/v3.2.0)
+The first minutes are quiet on purpose. Dependencies install themselves. Leave that window open. The browser opens once, on first onboard, and you sign in on every platform above. After that, those sessions stay.
+
+**Stable release: [v3.4.0](https://github.com/maazbin/jobpilot/releases/tag/v3.4.0).** The setup page and the dashboard test whether X, LinkedIn, and Gmail are actually signed in.
+
+[![Stable](https://img.shields.io/badge/release-v3.4.0-22c55e.svg)](https://github.com/maazbin/jobpilot/releases/tag/v3.4.0)
 [![MIT License](https://img.shields.io/badge/license-MIT-14532d.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/protocol-MCP-2563eb.svg)](https://modelcontextprotocol.io)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-166534.svg)](https://nodejs.org)
@@ -146,7 +156,17 @@ This is the line we will keep. New work happens after this tag.
 
 ---
 
-## Since v3.2.0
+## v3.4.0
+
+The setup page and the dashboard have **Test sign-in**. It opens X, LinkedIn, and Gmail in the debug Chrome and reports which of those sessions are signed in. An open tab whose address contains `x.com` is not treated as proof. The CV drop zone on the setup page keeps its script alive, and a click there opens the file dialog once.
+
+Search and outreach still wait until the profile form has a name, an email, a CV, a LinkedIn URL, target roles, and the sites you are signed into.
+
+## v3.3.0
+
+A lead stays when the role is remote and not limited to a country list. Timezone overlap is enough. An on-site or hybrid role stays only when the post offers visa sponsorship or relocation in a place on the profile. The dashboard switch for this is on unless the profile turns it off.
+
+Debug Chrome starts with Memory Saver and occluded-window throttling off, so a discarded tab does not stall the CDP handshake. A fresh clone finishes onboarding before any search. The dashboard mix sets how a cycle splits across sources and across email, posts, connect, DM, Easy Apply, and forms. On X, an apply link on the post is the application. A public reply is only for a post that has no apply link and no email. An application letter includes the JobPilot repository URL only when that profile saved the link.
 
 Indeed **Apply now** works in the normal signed-in window, with the debug port closed. Three in-site applications reached the page that says the application was submitted. The jobs home is `https://pk.indeed.com/`. A `from=` tracking parameter is not part of that page. Typing `viewjob?jk=` into the address bar stops on Additional Verification. Leave that page. Do not click the check. Glassdoor job pages load after Google sign-in, and in-site Apply now there has still not been submitted. Issue [#1](https://github.com/maazbin/jobpilot/issues/1) is closed. Issue [#2](https://github.com/maazbin/jobpilot/issues/2) stays open for a driven Glassdoor browser.
 
@@ -221,20 +241,30 @@ git clone https://github.com/maazbin/jobpilot
 cd jobpilot
 ```
 
-### 2. Install, start the data worker, then open the folder in your agent
+### 2. First run — let the dependencies finish
 
 ```bash
-npm install
 npm run agent
 ```
 
-`npm install` is also what `start.js` runs on a fresh clone. `npm run agent` keeps the data worker up. It does not email or apply. With no profile, it waits.
+A fresh clone has no `node_modules`. `npm run agent` and `start.js` run `npm install` for you. Leave that process open until it says the dependencies are installed. Do not hunt, and do not open a browser, while it runs. If the install fails, stop and read the error.
 
-Then open the folder in your agent and say:
+`npm run agent` then keeps the data worker up. It does not email or apply. With no profile, it waits.
 
-> Set up JobPilot. Install what is missing, start the data worker, and onboard me. Do not search or apply until my profile is saved.
+Open the folder in your agent and say:
 
-The repo already contains the MCP config. `start.js` installs dependencies, opens Chrome on the debug port, and serves the tools. Approve the server if the CLI asks.
+> Set up JobPilot. Let the first-run dependency install finish. Start the data worker. Open the browser once for onboard. I will sign in on every platform. Do not search or apply until my profile is saved.
+
+### 3. One browser, on first onboard
+
+The browser opens once, for this sign-in. Later runs reuse it.
+
+1. In the debug window, sign in to **LinkedIn**, **Gmail**, **X**, and **Instagram**.
+2. Close that debug window. Open **Glassdoor** and choose **Continue with Google**. Then sign in to **Indeed** with the same Google account.
+
+Opening Indeed first sticks on a check with no form. Upload the CV on the onboard page. Do not paste a file path into chat.
+
+The repo already contains the MCP config. `start.js` installs dependencies and serves the tools. Approve the server if the CLI asks. Sign in during the first onboard only.
 
 Set `JOBPILOT_NO_AUTOWORKER=1` on the MCP server so it stays a tool server and does not start a second worker.
 
@@ -258,7 +288,7 @@ Add this to the global MCP config, with the absolute path to `start.js`:
 
 </details>
 
-### 3. Let the brain drive
+### 4. Let the brain drive
 
 [`AGENTS.md`](AGENTS.md) is the standing guide. The first path is [`docs/paths/setup/path.md`](docs/paths/setup/path.md). The brain checks `onboard_status`, opens `http://127.0.0.1:7788/onboard` while the profile has gaps, and waits. You upload the CV in that form. You never paste a file path into chat. Search and outreach start only after that form is complete.
 

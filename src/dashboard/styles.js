@@ -33,7 +33,7 @@ td{padding:6px 9px;border-bottom:1px solid #16203a;vertical-align:top}
 tr:hover td{background:#0f172a}.empty{text-align:center;color:#475569;padding:18px}
 .b{padding:1px 7px;border-radius:6px;font-size:11px;font-weight:700;border:1px solid}
 .b-agent{padding:1px 7px;border-radius:6px;font-size:10px;font-weight:700;border:1px solid;background:#0c1f3a22;color:#60a5fa;border-color:#60a5fa55}
-.tabs{display:flex;gap:6px;margin-top:18px;flex-wrap:wrap}
+.tabs{display:flex;gap:6px;margin-top:18px;flex-wrap:wrap;scroll-margin-top:12px}
 .tabs button{background:#111a2e;color:#94a3b8;border:1px solid #1e293b;border-bottom:none;padding:8px 14px;border-radius:8px 8px 0 0;cursor:pointer;font-weight:600}
 .tabs button.on{background:#1e293b;color:#fff}.pane{display:none}.pane.on{display:block}
 .legend{display:grid;grid-template-columns:repeat(3,1fr);gap:6px 18px;background:#111a2e;border:1px solid #1e293b;border-radius:8px;padding:10px 14px;font-size:12px}
@@ -67,6 +67,9 @@ input.s{background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:6px 10
 .boardlogin button{margin-right:8px}
 .loginbtn{display:inline-block;background:#ef4444;color:#fff;font-weight:700;padding:5px 14px;border-radius:7px;text-decoration:none;margin:0 4px}
 .loginbtn:hover{background:#dc2626}
+.loginask{position:sticky;top:0;z-index:30;background:#450a0a;border:2px solid #ef4444;border-radius:10px;padding:16px 18px;margin-bottom:14px;color:#fee2e2;font-size:16px;line-height:1.45;box-shadow:0 8px 24px #0008}
+.loginask-row{margin-top:10px}
+button.loginbtn{border:0;cursor:pointer;font-size:15px}
 .consentbar{background:#0b1f17;border:1px solid #166534;border-radius:8px;padding:9px 14px;margin-bottom:12px;font-size:12.5px;color:#bbf7d0}
 .cbtn{border:none;border-radius:7px;padding:5px 12px;font-weight:700;cursor:pointer;margin-left:8px}
 .cbtn.on{background:#22c55e;color:#06240f}.cbtn.off{background:#334155;color:#e2e8f0}

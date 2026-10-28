@@ -12,10 +12,11 @@ const need = ['@modelcontextprotocol/sdk', 'playwright', 'sql.js', 'node-fetch']
 const missing = need.filter(d => !fs.existsSync(path.join(ROOT, 'node_modules', d)));
 
 if (missing.length) {
-  log(`installing dependencies (first run): ${missing.join(', ')} …`);
+  log('FIRST RUN: installing dependencies. Leave this process open until it finishes. Do not open the browser yet.');
+  log(`missing: ${missing.join(', ')}`);
   const r = spawnSync('npm', ['install', '--no-audit', '--no-fund'], { cwd: ROOT, stdio: 'inherit', shell: true });
   if (r.status !== 0) { log('npm install failed — run `npm install` manually'); process.exit(1); }
-  log('dependencies installed.');
+  log('dependencies installed. The browser opens once, on first onboard, for sign-in.');
 } else {
   log('dependencies present.');
 }
