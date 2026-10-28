@@ -287,6 +287,7 @@ async function fillStep(frame) {
         const a = textAnswer(q, { numeric });
         if (a != null && a !== '') {
           const loc = frame.locator(f.name ? `[name="${f.name}"]` : `textbox`).first();
+          await loc.click({ timeout: 1500 }).catch(() => {});
           await loc.fill(String(a), { timeout: 2500 }).catch(() => {});
           // SmartApply is React-controlled: dispatch input+change so the filled value registers
           // and the Continue button enables.
@@ -294,11 +295,75 @@ async function fillStep(frame) {
             await frame.evaluate(name => {
               const esc = s => (window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/"/g, '\\"'));
               const el = document.querySelector(`[name="${esc(name)}"]`);
-              if (el) for (const ev of ['input', 'change']) el.dispatchEvent(new Event(ev, { bubbles: true }));
+              if (el) { for (const ev of ['input', 'change']) el.dispatchEvent(new Event(ev, { bubbles: true })); el.blur?.(); }
             }, f.name).catch(() => {});
           }
         } else if (f.required) { unanswered.push(q); askLater(q); }
       }
+    } catch {}
+  }
+
+  // ── Custom single-select comboboxes. SmartApply renders some questions (e.g. "Notice
+  //    Period (Days)") as a role=combobox DIV with data-testid="…-select-list-select-list",
+  //    not a native <select>, so the SELECT branch above never sees them. Click, read the
+  //    rendered options, and pick with the profile answer (text first, then the option engine).
+  const combos = await frame.evaluate(() => {
+    const out = [];
+    for (const el of document.querySelectorAll('[role="combobox"]')) {
+      const testid = el.getAttribute('data-testid') || '';
+      if (!/select-list-select-list$/.test(testid)) continue;
+      const r = el.getBoundingClientRect();
+      if (!(r.width > 0 && r.height > 0)) continue;
+      let question = (el.getAttribute('aria-label') || '').trim();
+      // SmartApply often sets aria-label to the placeholder ("Select an option"), not the real
+      // question. The question text lives in the wrapper's first line that ends with "?".
+      if (!question || /^(select an option|select|choose an option|required)$/i.test(question)) {
+        question = '';
+        for (let node = el.parentElement, i = 0; node && i < 6 && !question; i++, node = node.parentElement) {
+          const line = (node.innerText || '').split('\n').map(s => s.trim()).find(s => /\?/.test(s));
+          if (line) question = line;
+        }
+      }
+      out.push({ testid, current: (el.innerText || '').trim(), question });
+    }
+    return out;
+  }).catch(() => []);
+
+  for (const c of combos) {
+    if (c.current && !/^select an option$/i.test(c.current)) continue;
+    const q = c.question || 'select an option';
+    // Options are keyed to this combobox's own hash: "input-q_<hash>-select-list-<option>".
+    // Both dropdowns' option lists exist in the DOM at once, so scope by that prefix.
+    const prefix = c.testid.replace(/-select-list-select-list$/, '-select-list-');
+    try {
+      await frame.click(`[data-testid="${c.testid}"]`, { timeout: 2500 });
+      await SLEEP(450);
+      const options = await frame.evaluate(p => [...document.querySelectorAll('[role="option"]')]
+        .filter(o => (o.getAttribute('data-testid') || '').startsWith(p) && o.getBoundingClientRect().height > 0)
+        .map(o => ({ t: (o.innerText || '').trim(), tid: o.getAttribute('data-testid') }))
+        .filter(o => o.t && o.tid), prefix).catch(() => []);
+      const norm = s => String(s || '').trim().toLowerCase();
+      const direct = textAnswer(q);
+      let picked = direct && options.find(o => norm(o.t) === norm(direct));
+      // Numeric dropdowns (salary bands) rarely contain the exact figure. Pick the option
+      // numerically closest to the profile answer instead of failing the whole step.
+      const directNum = direct != null ? parseFloat(String(direct).replace(/,/g, '')) : NaN;
+      if (!picked && Number.isFinite(directNum)) {
+        const nums = options
+          .map(o => ({ o, n: parseFloat(o.t.replace(/[^0-9.]/g, '')) }))
+          .filter(x => Number.isFinite(x.n));
+        if (nums.length) picked = nums.reduce((a, b) => (Math.abs(b.n - directNum) < Math.abs(a.n - directNum) ? b : a)).o;
+      }
+      if (!picked) {
+        const label = choiceAnswer(q, options.map(o => o.t));
+        picked = label && options.find(o => norm(o.t) === norm(label));
+      }
+      if (!picked) { unanswered.push(q); askLater(q); continue; }
+      // Real pointer click — these list widgets ignore a synthetic el.click().
+      await frame.locator(`[data-testid="${picked.tid}"]`).click({ timeout: 3000 }).catch(() => {});
+      await SLEEP(300);
+      const now = await frame.evaluate(tid => document.querySelector(`[data-testid="${tid}"]`)?.innerText || '', c.testid).catch(() => '');
+      if (!now || /^select an option$/i.test(now.trim())) { unanswered.push(q); askLater(q); }
     } catch {}
   }
   return unanswered;
@@ -516,8 +581,16 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
     // Stall guard: if we have revisited this exact module 3 times with no progress and no
     // unanswered required question, the primary control is dead/placeholder (e.g. SmartApply's
     // off-screen hp-continue-button-N) — stop and record the encounter for self-evolution rather
-    // than returning a vague 10-step timeout.
+    // than returning a vague 10-step timeout. A module that is still "Preparing review" is not a
+    // stall: the review payload renders a few seconds after the module URL changes, so wait it out.
     if (sameModuleClicks >= 2) {
+      let interim = '';
+      try { interim = await frame.evaluate(() => document.body?.innerText || ''); } catch {}
+      if (/preparing review|loading/i.test(interim) && !/submit your application/i.test(interim)) {
+        sameModuleClicks = 0;
+        await SLEEP(2000);
+        continue;
+      }
       await encounter('smartapply_stall', 'advance did not change module: ' + moduleUrl.replace(/^https?:\/\/[^/]+/, ''), { url: page.url(), page }).catch(() => {});
       return { ok: false, result: 'error', detail: 'SmartApply did not advance past ' + (moduleUrl.split('/form/')[1] || moduleUrl) + ' after repeated Continue clicks (likely a dead/placeholder control)', url: page.url() };
     }
@@ -546,6 +619,25 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
       // bounds this so we never spin forever.
       if (step < 9) continue;
       return { ok: false, result: 'error', detail: 'could not find a Continue/Submit button to advance', url: page.url() };
+    }
+    // A final submit runs an invisible reCAPTCHA handshake. The module URL stays on
+    // review-module for several seconds while that runs, so polling is required — re-clicking
+    // (and the same-module stall guard) would otherwise abandon an application that is in flight.
+    if (/submit/i.test(advanced)) {
+      for (let i = 0; i < 12; i++) {
+        await SLEEP(1500);
+        if (await confirmed(page)) return { ok: true, result: 'submitted', detail: 'Application submitted + confirmed', url: page.url() };
+        if (await visibleHumanCheck(page)) {
+          await encounter('human_check', 'visible CAPTCHA/Cloudflare after submit', { url: page.url(), page }).catch(() => {});
+          return { ok: false, result: 'waiting_for_human', detail: 'Human-check after submit — please click/solve it in the debug Chrome window, then resume.', url: page.url() };
+        }
+      }
+      // Confirmation page without the expected wording: not a success by the path rules.
+      if (/post-apply/i.test(page.url())) {
+        return { ok: false, result: 'error', detail: 'reached post-apply but the page did not confirm submission', url: page.url() };
+      }
+      sameModuleClicks = 0;   // give the review module another pass instead of stalling
+      continue;
     }
     // If we just clicked the final submit, a human-check often fires right here — the loop's next
     // iteration detects it and hands off.
