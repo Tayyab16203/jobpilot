@@ -481,9 +481,22 @@ export function choiceAnswer(question, options) {
     basis = 'yes/no resolved from workAuth + country (resolveYesNo)';
   } else if (/years/.test(q)) {
     const y = parseFloat(textAnswer('years of experience') || '0');
-    derived = opts.find(o => { const m = o.match(/(\d+)\s*[-–to]+\s*(\d+)/); return m && y >= +m[1] && y <= +m[2]; })
-      || opts.find(o => { const m = o.match(/(\d+)\s*\+/); return m && y >= +m[1]; })
-      || opts[opts.length - 1];
+    const bound = s => { const m = String(s).match(/(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : null; };
+    // Handle all three shapes SmartApply uses: "2–3 years", "Less than 5 years", "More than 7
+    // years". The old range-only regex missed the "less than" band and fell through to the LAST
+    // option, which claimed the user's 3 years were "More than 7".
+    derived = opts.find(o => {
+      const s = o.toLowerCase();
+      const range = s.match(/(\d+)\s*[-–]+\s*(\d+)/);
+      if (range) return y >= +range[1] && y <= +range[2];
+      if (/less than|fewer than|under|below/.test(s)) { const n = bound(s); return n != null && y < n; }
+      if (/more than|over|above/.test(s) || /\d+\s*\+/.test(s)) { const n = bound(s); return n != null && y >= n; }
+      return false;
+    })
+      // Unknown bands: pick the lowest band whose lower bound does not exceed y (conservative,
+      // never inflates experience), else the first option.
+      || [...opts].reverse().find(o => { const n = bound(o); return n != null && y >= n; })
+      || opts[0];
     basis = 'yearsExperience from profile';
   } else if (/\b(level of|rate your|your (level|experience|proficiency)|how (would you rate|experienced)|hands-on experience|experience (with|in|using)|familiar(ity)? with|proficiency (with|in))\b/.test(q)
              && opts.some(o => /no experience|basic|beginner|intermediate|advanced|expert|proficient|strong|hands-on|production|some of these|most\/all|regularly|daily|occasionally|never/i.test(o))) {

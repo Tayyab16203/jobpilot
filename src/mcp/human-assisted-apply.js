@@ -224,49 +224,30 @@ async function fillStep(frame) {
       const picked = choiceAnswer(q, g.options.map(o => o.label));
       if (!picked) { if (g.required) { unanswered.push(q); askLater(q); } continue; }
       const value = chooseRadioValue(g, picked);
+      if (value == null) continue;
 
-      // (a)+(b) in-frame: find input by name+value (or by matching label text), set checked and
-      // dispatch click/input/change so React's controlled state updates and Continue enables.
-      const okInFrame = await frame.evaluate(({ name, value, label }) => {
-        const esc = s => (window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/"/g, '\\"'));
-        let input = null;
-        if (value != null) input = document.querySelector(`input[name="${esc(name)}"][value="${esc(value)}"]`);
-        if (!input) {
-          const inputs = [...document.querySelectorAll(`input[name="${esc(name)}"]`)];
-          const want = String(label || '').trim().toLowerCase();
-          input = inputs.find(el => {
-            const t = (el.labels?.[0]?.innerText || el.getAttribute('aria-label') || el.closest('label')?.innerText || el.value || '').trim().toLowerCase();
-            return t === want || (want && t.includes(want));
-          }) || null;
+      // SmartApply renders options as radio cards: the real <input> is visually hidden inside a
+      // <label>. Setting input.checked + dispatching a synthetic Event('click') updates the DOM
+      // but NOT React's form state — the next re-render (Continue) wipes it and validation fails.
+      // A trusted Playwright click on the input (force: hidden control) or its <label> commits.
+      let nowChecked = false;
+      const inputLoc = frame.locator(`input[name="${String(g.name).replace(/["\\]/g, '\\$&')}"][value="${String(value).replace(/["\\]/g, '\\$&')}"]`).first();
+      try {
+        if (await inputLoc.count().catch(() => 0)) {
+          await inputLoc.click({ force: true, timeout: 2500 }).catch(() => {});
+          nowChecked = await inputLoc.isChecked().catch(() => false);
+          if (!nowChecked) {
+            const id = await inputLoc.getAttribute('id').catch(() => null);
+            if (id) {
+              const lab = frame.locator(`label[for="${String(id).replace(/["\\]/g, '\\$&')}"]`).first();
+              if (await lab.count().catch(() => 0)) {
+                await lab.click({ timeout: 2500 }).catch(() => {});
+                nowChecked = await inputLoc.isChecked().catch(() => false);
+              }
+            }
+          }
         }
-        if (!input) return false;
-        input.checked = true;
-        for (const ev of ['input', 'change', 'click']) input.dispatchEvent(new Event(ev, { bubbles: true }));
-        return input.checked === true;
-      }, { name: g.name, value, label: picked }).catch(() => false);
-
-      if (!okInFrame) {
-        // Playwright fallback: locator by name+value, else by label.
-        let checked = false;
-        if (value != null) {
-          try {
-            const byVal = frame.locator(`input[name="${g.name}"][value="${String(value).replace(/"/g, '\\"')}"]`).first();
-            if (await byVal.count().catch(() => 0)) { await byVal.check({ timeout: 2000 }); checked = true; }
-          } catch {}
-        }
-        if (!checked) {
-          try {
-            const re = new RegExp(String(picked).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-            await frame.getByLabel(re).first().check({ timeout: 2000 });
-          } catch {}
-        }
-      }
-
-      // Verify a required group ended with a checked option; otherwise park it.
-      const nowChecked = await frame.evaluate(name => {
-        const esc = s => (window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/"/g, '\\"'));
-        return [...document.querySelectorAll(`input[name="${esc(name)}"]`)].some(el => el.checked);
-      }, g.name).catch(() => false);
+      } catch {}
       if (!nowChecked && g.required) { unanswered.push(q); askLater(q); }
     } catch {}
   }
@@ -301,6 +282,75 @@ async function fillStep(frame) {
       }
     } catch {}
   }
+  // ── Custom SmartApply dropdowns ([role=combobox] with a select-list testid). The real <select>
+  //    path above never sees these. Both dropdowns' option lists live in the DOM at once, so scope
+  //    options by the combobox's own testid prefix, and use trusted clicks so React commits.
+  const combos = await frame.evaluate(() => {
+    const out = [];
+    for (const el of document.querySelectorAll('[role="combobox"]')) {
+      const tid = el.getAttribute('data-testid') || '';
+      if (!/select-list-select-list$/.test(tid) || el.getBoundingClientRect().width === 0) continue;
+      const current = (el.innerText || '').trim();
+      let q = '';
+      let node = el;
+      for (let i = 0; i < 7 && node; i++, node = node.parentElement) {
+        const t = node.getAttribute && node.getAttribute('data-testid') || '';
+        if (t.startsWith('input-q_') && !/select-list/.test(t)) {
+          const lines = (node.innerText || '').split('\n').map(s => s.trim()).filter(Boolean)
+            .filter(s => s !== current && !/^clear your answer$/i.test(s) && !/^required$/i.test(s) && s !== '*');
+          q = lines.find(s => s.includes('?')) || lines[0] || '';
+          break;
+        }
+      }
+      if (!q) {
+        const lines = (el.getAttribute('aria-label') || '').split('\n').map(s => s.trim()).filter(Boolean);
+        q = lines.find(s => s.includes('?')) || lines[0] || '';
+      }
+      out.push({ tid, current, question: q });
+    }
+    return out;
+  }).catch(() => []);
+
+  for (const c of combos) {
+    if (c.current && !/^(select an option|select one|choose|)$/i.test(c.current)) continue;
+    try {
+      const q = c.question || 'select an option';
+      const box = frame.locator(`[data-testid="${c.tid}"]`).first();
+      await box.scrollIntoViewIfNeeded().catch(() => {});
+      await box.click({ timeout: 3000 }).catch(() => {});
+      await new Promise(r => setTimeout(r, 450));
+      const prefix = c.tid.replace(/-select-list-select-list$/, '-select-list-');
+      const opts = await frame.evaluate(p => [...document.querySelectorAll('[role="option"]')]
+        .filter(o => (o.getAttribute('data-testid') || '').startsWith(p) && o.getBoundingClientRect().height > 0)
+        .map(o => ({ t: (o.innerText || '').trim(), tid: o.getAttribute('data-testid') }))
+        .filter(o => o.t && o.tid), prefix).catch(() => []);
+      if (!opts.length) { unanswered.push(q); askLater(q); continue; }
+
+      // 1) exact answer text, 2) nearest numeric option to the answer engine's figure,
+      // 3) semantic choice matching on the option labels.
+      const direct = String(textAnswer(q, { numeric: /\d/.test(q) || /salary|pay|amount|years|number|how many/i.test(q) }) ?? '').trim();
+      let pick = direct ? opts.find(o => o.t.toLowerCase() === direct.toLowerCase()) : null;
+      if (!pick && direct) {
+        const want = parseFloat(direct.replace(/[^0-9.]/g, ''));
+        if (Number.isFinite(want)) {
+          const nums = opts.map(o => ({ o, n: parseFloat(o.t.replace(/[^0-9.]/g, '')) })).filter(x => Number.isFinite(x.n));
+          if (nums.length) pick = nums.reduce((a, b) => Math.abs(b.n - want) < Math.abs(a.n - want) ? b : a).o;
+        }
+      }
+      if (!pick) {
+        const ch = choiceAnswer(q, opts.map(o => o.t));
+        if (ch) pick = opts.find(o => o.t.toLowerCase() === String(ch).toLowerCase())
+          || opts.find(o => o.t.toLowerCase().includes(String(ch).toLowerCase()));
+      }
+      if (!pick) { unanswered.push(q); askLater(q); continue; }
+
+      await frame.locator(`[data-testid="${pick.tid}"]`).first().click({ timeout: 3000 }).catch(() => {});
+      await new Promise(r => setTimeout(r, 300));
+      const now = await frame.evaluate(tid => (document.querySelector(`[data-testid="${tid}"]`)?.innerText || '').trim(), c.tid).catch(() => '');
+      if (!now || /^(select an option|select one|choose)$/i.test(now)) { unanswered.push(q); askLater(q); }
+    } catch {}
+  }
+
   return unanswered;
 }
 
@@ -311,7 +361,7 @@ async function clickAdvance(frame) {
   // text. NEVER match or click the reCAPTCHA control.
   const inPage = await frame.evaluate(() => {
     const SUBMIT = /submit your application|submit application|^submit$/i;
-    const CONT = /continue|review your application|^review$|^next$/i;
+    const CONT = /^update$|^review$|^next$|continue|review your application/i;
     const TID = /continue-button|form-action-continue|submit|review|next/i;
     const isCaptcha = el =>
       el.id === 'g-recaptcha-response' ||
@@ -378,7 +428,7 @@ async function clickAdvance(frame) {
 async function findDisabledPrimary(frame) {
   return await frame.evaluate(() => {
     const SUBMIT = /submit your application|submit application|^submit$/i;
-    const CONT = /continue|review your application|^review$|^next$/i;
+    const CONT = /^update$|^review$|^next$|continue|review your application/i;
     const TID = /continue-button|form-action-continue|submit|review|next/i;
     const CANON = /^(continue-button|form-action-continue|submit-button|review-button)$/i;
     const isCaptcha = el =>
@@ -518,6 +568,16 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
     // off-screen hp-continue-button-N) — stop and record the encounter for self-evolution rather
     // than returning a vague 10-step timeout.
     if (sameModuleClicks >= 2) {
+      // The review module renders its Submit button a few seconds after the module URL changes
+      // ("Preparing review…"). That is loading, not a dead control — wait it out instead of
+      // parking the encounter.
+      let interim = '';
+      try { interim = await frame.evaluate(() => document.body?.innerText || ''); } catch {}
+      if (/preparing review|loading/i.test(interim) && !/submit your application/i.test(interim)) {
+        sameModuleClicks = 0;
+        await SLEEP(2500);
+        continue;
+      }
       await encounter('smartapply_stall', 'advance did not change module: ' + moduleUrl.replace(/^https?:\/\/[^/]+/, ''), { url: page.url(), page }).catch(() => {});
       return { ok: false, result: 'error', detail: 'SmartApply did not advance past ' + (moduleUrl.split('/form/')[1] || moduleUrl) + ' after repeated Continue clicks (likely a dead/placeholder control)', url: page.url() };
     }
@@ -547,8 +607,20 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
       if (step < 9) continue;
       return { ok: false, result: 'error', detail: 'could not find a Continue/Submit button to advance', url: page.url() };
     }
-    // If we just clicked the final submit, a human-check often fires right here — the loop's next
-    // iteration detects it and hands off.
+    // If we just clicked the final submit, the confirmation page lands a beat later. Wait for it
+    // here so the loop never re-clicks Submit on a page that already accepted the application.
+    if (/submit/i.test(advanced)) {
+      for (let i = 0; i < 14; i++) {
+        await SLEEP(1500);
+        if (await confirmed(page)) return { ok: true, result: 'submitted', detail: 'Application submitted + confirmed', url: page.url() };
+        if (await visibleHumanCheck(page)) {
+          return { ok: false, result: 'waiting_for_human', detail: '🧑 Human-check on screen (CAPTCHA/Cloudflare). Please solve it in the Chrome window, then call this tool again with resume:true.', url: page.url() };
+        }
+      }
+      // Not confirmed after ~21s — let the loop re-examine the module once instead of looping blind.
+      sameModuleClicks = 0;
+      continue;
+    }
   }
 
   if (await confirmed(page)) return { ok: true, result: 'submitted', detail: 'Application submitted + confirmed', url: page.url() };
