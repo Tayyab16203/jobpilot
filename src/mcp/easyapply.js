@@ -678,7 +678,7 @@ export async function easyApply({ url, timeoutMs = 120000, dryRun = false, job =
         await page.close().catch(() => {});
         return { ok, result: ok ? 'applied' : 'stuck', detail: ok ? `submitted + verified (${step + 1} pages)` : 'submit not confirmed', meta, used: ctx.used };
       }
-      const next = dlg.getByRole('button', { name: /continue to next step|review your application|^next$|^review$/i }).first();
+      const next = dlg.getByRole('button', { name: /continue to next step|review your application|accept and continue|^next$|^review$/i }).first();
       if (!(await next.isVisible().catch(() => false))) { await encounter('easy_apply', 'no next/submit button', { url, page, scope: dlg }); break; }
       await next.click().catch(() => {});
       await SLEEP(1600);
@@ -792,7 +792,7 @@ export async function inspectEasyApply({ url, timeoutMs = 120000 }) {
       pages.push({ step, heading: scan.heading, fields: logical });
       const submit = dlg.getByRole('button', { name: /submit application/i }).first();
       if (await submit.isVisible().catch(() => false)) break;
-      const next = dlg.getByRole('button', { name: /continue to next step|review your application|^next$|^review$/i }).first();
+      const next = dlg.getByRole('button', { name: /continue to next step|review your application|accept and continue|^next$|^review$/i }).first();
       if (!(await next.isVisible().catch(() => false))) break;
       await next.click().catch(() => {});
       await SLEEP(1500);
@@ -831,7 +831,7 @@ export async function applyEasyApplyWithAnswers({ url, answers = {}, timeoutMs =
         await page.close().catch(() => {});
         return { ok: okv, result: okv ? 'applied' : 'stuck', detail: okv ? `submitted + verified (${step + 1} pages)` : 'submit not confirmed', used: ctx.used };
       }
-      const next = dlg.getByRole('button', { name: /continue to next step|review your application|^next$|^review$/i }).first();
+      const next = dlg.getByRole('button', { name: /continue to next step|review your application|accept and continue|^next$|^review$/i }).first();
       if (!(await next.isVisible().catch(() => false))) break;
       await next.click().catch(() => {});
       await SLEEP(1600);
