@@ -209,7 +209,21 @@ async function fillStep(frame) {
       }
       fields.push({ tag: el.tagName, type: el.type || '', name: el.name || el.id || '', label: textOf(el), required: el.required, value: el.value || '', options: el.tagName === 'SELECT' ? [...el.options].map(o => (o.text || o.value || '').trim()).filter(Boolean) : [] });
     }
-    return { fields, groups: Object.values(groups) };
+    // SmartApply renders some questions (e.g. "Notice Period (Days)") as a custom
+    // role=combobox select-list, not a native <select>, so the loop above never sees them.
+    const vis = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    const comboLabel = c => {
+      const lb = c.getAttribute('aria-labelledby');
+      let t = (lb ? (document.getElementById(lb)?.innerText || '') : '').trim();
+      if (!t) t = (c.closest('[class*="field" i]')?.innerText || '').trim();
+      if (!t) t = (c.innerText || '').trim();
+      return t.split('\n')[0].replace(/\s+/g, ' ').trim();
+    };
+    const combos = [...document.querySelectorAll('[role="combobox"]')]
+      .filter(c => c.tagName !== 'SELECT' && vis(c))
+      .map(c => ({ label: comboLabel(c).slice(0, 140), value: (c.innerText || '').replace(/\s+/g, ' ').trim(), required: c.getAttribute('aria-required') === 'true' || /\*$/.test(comboLabel(c)) }))
+      .filter(c => c.label);
+    return { fields, groups: Object.values(groups), combos };
   }).catch(() => ({ fields: [], groups: [] }));
 
   const unanswered = [];
@@ -301,7 +315,57 @@ async function fillStep(frame) {
       }
     } catch {}
   }
+
+  // ── Custom role=combobox select-lists (SmartApply "Notice Period (Days)" etc.): open the list,
+  //    then click the option whose text matches the answer. Without this the field stays empty and
+  //    Continue never enables, which the stall guard reports as a dead control.
+  for (const c of scan.combos || []) {
+    if (c.value && !/^(select|choose|please|--) /i.test(c.value)) continue; // already chosen
+    try {
+      const a = textAnswer(c.label, { numeric: true });
+      if (a == null || a === '') { if (c.required) { unanswered.push(c.label); askLater(c.label); } continue; }
+      const picked = await pickComboOption(frame, c.label, String(a));
+      if (!picked && c.required) { unanswered.push(c.label); askLater(c.label); }
+    } catch {}
+  }
   return unanswered;
+}
+
+// Open a role=combobox by its visible label and click the option matching `want` (exact text, then
+// same leading number, then substring). Options live in a SmartApply <div id="Popup…"> listbox.
+async function pickComboOption(frame, label, want) {
+  const opened = await frame.evaluate((label) => {
+    const vis = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    const labOf = c => {
+      const lb = c.getAttribute('aria-labelledby');
+      let t = (lb ? (document.getElementById(lb)?.innerText || '') : '').trim();
+      if (!t) t = (c.closest('[class*="field" i]')?.innerText || '').trim();
+      if (!t) t = (c.innerText || '').trim();
+      return t.split('\n')[0].replace(/\s+/g, ' ').trim();
+    };
+    const c = [...document.querySelectorAll('[role="combobox"]')].filter(vis)
+      .find(x => x.tagName !== 'SELECT' && labOf(x).toLowerCase().startsWith(label.toLowerCase().slice(0, 30)));
+    if (!c) return false;
+    c.focus();
+    c.click();
+    return true;
+  }, label).catch(() => false);
+  if (!opened) return false;
+  await SLEEP(700);
+  return frame.evaluate((want) => {
+    const vis = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    const pop = document.querySelector('[id^="Popup"]') || document.querySelector('[role="listbox"]');
+    const opts = (pop ? [...pop.querySelectorAll('[role="option"]')] : [...document.querySelectorAll('[role="option"]')]).filter(vis);
+    if (!opts.length) return false;
+    const w = String(want).trim();
+    const wd = w.replace(/\D/g, '');
+    let el = opts.find(o => (o.innerText || '').trim().toLowerCase() === w.toLowerCase());
+    if (!el && wd) el = opts.find(o => ((o.innerText || '').match(/\d+/) || [''])[0] === wd);
+    if (!el && w) el = opts.find(o => (o.innerText || '').toLowerCase().includes(w.toLowerCase()));
+    if (!el) return false;
+    el.click();
+    return true;
+  }, want).catch(() => false);
 }
 
 async function clickAdvance(frame) {
