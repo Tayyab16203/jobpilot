@@ -20,6 +20,17 @@ function ans(p, key, dflt = '') {
   return a[key] != null && a[key] !== '' ? String(a[key]) : dflt;
 }
 
+/** Notice period expressed in days, from a human answer like "2 weeks" or "14 days". */
+function noticeDays(p, dflt = 14) {
+  const raw = ans(p, 'notice period', String(dflt)).toLowerCase();
+  const weeks = raw.match(/(\d+(?:\.\d+)?)\s*week/);
+  if (weeks) return String(Math.round(parseFloat(weeks[1]) * 7));
+  const days = raw.match(/(\d+)\s*day/);
+  if (days) return days[1];
+  const n = parseInt(raw, 10);
+  return String(Number.isFinite(n) ? n : dflt);
+}
+
 // Public general-post-office codes. Used only when preferences.adaptFields is on
 // and the profile has no postal code of its own.
 const CITY_ADMIN = {
@@ -217,7 +228,7 @@ export function textAnswer(question, { numeric = false } = {}) {
   // evolution memory so an older human-readable answer like "2 weeks" cannot leak into
   // a numeric-only field.
   if (/notice period[^?]*\bdays?\b/.test(q)) {
-    const days = String(parseInt(ans(p, 'notice period', '14')) || 14);
+    const days = noticeDays(p);
     recordAgentAnswer(question, days, 'notice period from profile (days)');
     return days;
   }
@@ -274,7 +285,7 @@ export function textAnswer(question, { numeric = false } = {}) {
   } else if (/notice period|how soon|start date|when can you start|availability to start/.test(q)) {
     const daysOnly = /notice period[^?]*\bdays?\b/.test(q);
     derived = numeric || daysOnly
-      ? String(parseInt(ans(p, 'notice period', '14')) || 14)
+      ? noticeDays(p)
       : ans(p, 'notice period', '2 weeks');
     basis = daysOnly ? 'notice period from profile (days)' : 'notice period from profile';
   } else if (/hours.*(week|per)/.test(q)) {
