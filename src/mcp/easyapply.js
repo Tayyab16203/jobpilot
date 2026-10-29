@@ -227,7 +227,21 @@ async function checkOption(page, dataJa, optText, groupName, grpIdx = -1) {
     if (!(await lbl.count().catch(() => 0)) && optText) {
       lbl = page.locator('label').filter({ hasText: new RegExp(`^\\s*${optText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i') }).first();
     }
-    const box = await lbl.boundingBox().catch(() => null);
+    let box = await lbl.boundingBox().catch(() => null);
+    // 2026 radios/checkboxes are 0×0 inputs with no id and no label text; the visible option
+    // widget is a separate 24×20 label. Find the smallest visible widget containing the input's
+    // origin and click its center instead.
+    if (!box) box = await loc.evaluate(el => {
+      const r = el.getBoundingClientRect();
+      const px = (r.x || r.left) + 4, py = (r.y || r.top) + 4;
+      const hits = [...document.querySelectorAll('label, [role="radio"], [role="checkbox"]')]
+        .map(n => { const b = n.getBoundingClientRect(); return { b, area: b.width * b.height }; })
+        .filter(c => c.b.width > 0 && c.b.height > 0 && px >= c.b.x && px <= c.b.right && py >= c.b.y && py <= c.b.bottom)
+        .sort((a, b) => a.area - b.area);
+      if (!hits.length) return null;
+      const b = hits[0].b;
+      return { x: b.x, y: b.y, width: b.width, height: b.height };
+    }).catch(() => null);
     if (!box) return false;
     const x = box.x + box.width / 2, y = box.y + box.height / 2;
     try {
@@ -418,6 +432,13 @@ async function fillPage(page, dlg, ctx, job = {}) {
       if (!pick && /^n/.test(a)) pick = effLabels.find(l => /^no/i.test(l));
     }
     if (!pick) pick = choiceAnswer(g[0].q, effLabels);
+    // 2026 consent widgets render ONE nameless radio whose visible "Yes" text is outside the
+    // label, so optLabel is empty and choiceAnswer has no option text to match. The group has a
+    // single option, so the answer only decides whether to check it at all.
+    if (!pick && g.length === 1 && /agree|consent|terms|privacy|policy|certif|acknowledg|confirm|authori[sz]/i.test(g[0].q || '')) {
+      const yes = choiceAnswer(g[0].q, ['Yes', 'No']);
+      if (yes && /^yes/i.test(yes)) pick = effLabels[0] || '__only_option__';
+    }
     if (process.env.DEBUG_EA) console.log('RADIO', JSON.stringify({ q: g[0].q, raw: rawLabels, eff: effLabels, agent: agentR, pick }));
     if (!pick) {
       if (isOptionalConsent(g[0].q)) continue; // optional consent radio → don't block
