@@ -22,7 +22,7 @@ function start() {
   if (fs.existsSync(STOPFILE)) { log('stop flag present — not starting.'); process.exit(0); }
 
   const child = spawn('node', [path.join(ROOT, 'src', 'worker.js')], {
-    cwd: ROOT, stdio: 'inherit', env: process.env,
+    cwd: ROOT, stdio: 'inherit', env: process.env, windowsHide: true,
   });
 
   child.on('exit', (code, signal) => {

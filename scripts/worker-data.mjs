@@ -47,6 +47,7 @@ const child = spawn('node', [path.join(ROOT, 'src', 'worker.js')], {
   detached: true,
   stdio: 'ignore',
   env,
+  windowsHide: true,
 });
 child.unref();
 log('🟢 data-only worker started (scrape + dashboard only; agent handles find/match/apply/email). Stop with `npm run stop`.');

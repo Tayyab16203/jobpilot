@@ -19,21 +19,52 @@ const LINKEDIN_THROTTLE_RE = /security check|security verification|unusual activ
 // The Easy Apply control can remain visible while a LinkedIn checkpoint/overlay intercepts
 // clicks. Retry briefly, then classify the state as a throttle instead of burning the job's
 // attempts on the same 15-second locator timeout.
+// A click that TIMES OUT may still have dispatched: LinkedIn opens the dialog, the overlay
+// covers the button, and a retry then clicks the backdrop. That closes the dialog and raises
+// the "Save this application?" modal, which silently swallows every later click. So check for
+// an already-open dialog before each retry and never click while one is up.
+async function dialogAlreadyOpen(page) {
+  return page.locator('dialog[open]').first().isVisible().catch(() => false);
+}
+
 async function clickEasyApplyControl(page, control) {
   let lastError = '';
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0 && await dialogAlreadyOpen(page)) return { ok: true };
     if (!(await control.isVisible().catch(() => false))) break;
     try {
+      await control.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
       await control.click({ timeout: 5000 });
       return { ok: true };
     } catch (e) {
       lastError = e?.message || String(e);
+      if (await dialogAlreadyOpen(page)) return { ok: true };
+      // A forced click still dispatches at the control's own box — what a person does anyway.
+      try {
+        await control.click({ timeout: 4000, force: true });
+        return { ok: true };
+      } catch (e2) {
+        lastError = e2?.message || lastError;
+      }
+      if (await dialogAlreadyOpen(page)) return { ok: true };
       const state = `${await page.locator('body').innerText().catch(() => '')} ${page.url()}`;
       if (LINKEDIN_THROTTLE_RE.test(state)) return { ok: false, throttled: true, detail: 'LinkedIn security check / rate limit intercepted Easy Apply' };
-      await SLEEP(500);
+      await SLEEP(700);
     }
   }
   return { ok: false, throttled: false, detail: lastError || 'Easy Apply control was not clickable' };
+}
+
+// LinkedIn's "Save this application?" modal appears when the dialog is dismissed mid-flow.
+// It is a full-screen blocker: until it is answered, every button press goes nowhere. "Save"
+// preserves the draft and returns to the form, which is the only option that keeps progress.
+async function clearSavePrompt(page) {
+  const prompt = page.getByText(/Save this application\?/i).first();
+  if (!(await prompt.isVisible().catch(() => false))) return false;
+  const save = page.getByRole('button', { name: /^save$/i }).first();
+  if (await save.isVisible().catch(() => false)) await save.click({ force: true, timeout: 4000 }).catch(() => {});
+  await SLEEP(1200);
+  return true;
 }
 
 // LinkedIn can open the native dialog before its form is hydrated. During that interval the
@@ -659,6 +690,9 @@ export async function easyApply({ url, timeoutMs = 120000, dryRun = false, job =
 
     let lastProgress = '', same = 0;
     for (let step = 0; step < 15 && Date.now() - t0 < timeoutMs; step++) {
+      // A "Save this application?" modal left over from a dismissed dialog blocks every click;
+      // answering Save preserves the draft and hands the form back.
+      await clearSavePrompt(page);
       // PER-STEP REASONING: analyze this page (what each field needs + why), fill, then
       // re-analyze and re-fill once if required fields remain. The engine reasons at EVERY
       // step of the Easy Apply, not only once or only when stuck.
@@ -680,9 +714,22 @@ export async function easyApply({ url, timeoutMs = 120000, dryRun = false, job =
       }
       const next = dlg.getByRole('button', { name: /continue to next step|review your application|^next$|^review$/i }).first();
       if (!(await next.isVisible().catch(() => false))) { await encounter('easy_apply', 'no next/submit button', { url, page, scope: dlg }); break; }
+      const before = await dlg.evaluate(SCAN).catch(() => ({ progress: '' }));
       await next.click().catch(() => {});
       await SLEEP(1600);
-      const st = await dlg.evaluate(SCAN).catch(() => ({ progress: '', errors: [] }));
+      let st = await dlg.evaluate(SCAN).catch(() => ({ progress: '', errors: [] }));
+      // LinkedIn sometimes swallows Playwright's click on Next (React re-renders the button under
+      // the cursor), leaving the page where it was. A raw mouse click at the button's box is
+      // indistinguishable from a person's click and does advance — so use it as the fallback.
+      if (st.progress && before.progress && st.progress === before.progress) {
+        await next.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+        const box = await next.boundingBox().catch(() => null);
+        if (box && box.y + box.height <= (await page.evaluate(() => innerHeight).catch(() => 0))) {
+          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+          await SLEEP(2000);
+          st = await dlg.evaluate(SCAN).catch(() => ({ progress: '', errors: [] }));
+        }
+      }
       if (st.progress === lastProgress && st.progress) {
         same++;
         // a validation error usually means a numeric field got text, or a choice we didn't pick
@@ -820,6 +867,7 @@ export async function applyEasyApplyWithAnswers({ url, answers = {}, timeoutMs =
     const dlg = opened.dlg;
     let lastProgress = '', same = 0;
     for (let step = 0; step < 15 && Date.now() - t0 < timeoutMs; step++) {
+      await clearSavePrompt(page);
       await fillPage(page, dlg, ctx, job);
       await SLEEP(500);
       const submit = dlg.getByRole('button', { name: /submit application/i }).first();
