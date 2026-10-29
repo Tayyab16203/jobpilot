@@ -438,6 +438,16 @@ export function resolveYesNo(question, { yesLabel, noLabel, workAuth = {}, count
  * @param {string[]} options
  * @returns {string|null}
  */
+const NUM_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+// "In 2 weeks" and "Within two weeks" are the same choice; compare them without filler words.
+function looseOption(s) {
+  return String(s || '').toLowerCase()
+    .replace(/\b(one|two|three|four|five|six|seven|eight|nine|ten)\b/g, m => NUM_WORDS[m])
+    .replace(/\b(within|in|after|by|approximately|about|around)\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
 export function choiceAnswer(question, options) {
   const p = getProfile();
   const q = (question || '').toLowerCase();
@@ -449,7 +459,8 @@ export function choiceAnswer(question, options) {
   const learned = learnedAnswer(question);
   if (learned) {
     const m = opts.find(o => o.toLowerCase() === learned.toLowerCase())
-      || opts.find(o => o.toLowerCase().startsWith(learned.toLowerCase()));
+      || opts.find(o => o.toLowerCase().startsWith(learned.toLowerCase()))
+      || opts.find(o => looseOption(o) && looseOption(o) === looseOption(learned));
     if (m) { usedAnswer(question); return m; }
   }
 
