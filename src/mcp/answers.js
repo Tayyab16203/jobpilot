@@ -65,7 +65,12 @@ function escapeRegExp(value) {
 /** Approximate USD exchange rates for salary conversion. */
 const FX = { usd: 1, eur: 0.92, gbp: 0.79, pkr: 280, inr: 84, aed: 3.67, sar: 3.75, qar: 3.64, cad: 1.37 };
 
-const CURRENT_SALARY_RE = /\b(current|present|existing|currently\s+(earn|make)|current\s+(pay|salary|compensation))\b|were you (making|earning|paid)|previous (role|job).*(salary|pay|making)|last drawn|present ctc/;
+const CURRENT_SALARY_RE = /\b(current|present|existing|currently\s+(earn|make)|current\s+(pay|salary|compensation))\b|were you (making|earning|paid)|previous (role|job).*(salary|pay|making)|last drawn|present ctc|salario actual|pretensi[oó]n actual/;
+
+// Salary wording in every language LinkedIn applications show up in (EN + ES/PT/DE/FR/IT).
+// A Spanish "¿Cuál es tu expectativa salarial?" used to fall through to the generic engine and
+// park the whole application as "needs your answer".
+const SALARY_Q = /salary|compensation|\bctc\b|expected pay|pay expectation|financial expectations?|monthly gross|gross monthly|remuneration|were you making|desired (pay|salary)|current (pay|salary)|expectativa salarial|pretensi[oó]n salarial|pretens[aã]o salarial|sal[aá]rio (esperado|desejado|pretendido)|rango salarial|banda salarial|faixa salarial|remunera[cç][aã]o|gehaltsspanne|fourchette de (salaire|r[eé]mun[eé]ration)|fascia (salariale|retributiva)|gehaltsvorstellung|gehaltswunsch|pr[eé]tentions? salariales?|pretesa (economica|salariale)|retribuzione attesa/i;
 
 // Detect the currency a salary question asks for. DEFAULT is PKR (the user's home market) —
 // only switch to another currency when the question explicitly names it (USD/$/dollar, etc.).
@@ -82,6 +87,8 @@ function requestedCurrency(q, fallback = 'pkr') {
   const named = Object.keys(FX).find(c => new RegExp(`\\b${c}\\b`).test(q));
   if (named) return named;
   if (/\bpkr\b|rupee|\brs\b|pakistan/.test(q)) return 'pkr';
+  // A question written in a euro-area language quotes a euro-area market.
+  if (/expectativa|pretensi|pretens|salarial|sal[aá]rio|remunera[cç]|gehalts|pr[eé]tention|retribuzione|pretesa|gehalt\b/.test(q)) return 'eur';
   return fallback; // PKR by default
 }
 
@@ -197,7 +204,7 @@ export function textAnswer(question, { numeric = false } = {}) {
   //    Only skip this shortcut when the question names a SPECIFIC technology that the user
   //    has an explicit per-tech answer for (those are handled by the normal learned lookup).
   const yrsProfile = p.yearsExperience ? String(p.yearsExperience) : '';
-  const isGenericYears = /\bhow many years?\b|\byears? of (hands-on |professional |work |commercial |relevant |overall |total )*(experience|exp)\b/i.test(q)
+  const isGenericYears = /\bhow many years?\b|\byears? of (hands-on |professional |work |commercial |relevant |overall |total )*(experience|exp)\b|cu[aá]ntos a[nñ]os|anos de experi|jahre (berufs|praxis)?erfahrung|ann[eé]es d.exp[eé]rience|anni di esperienza/i.test(q)
     && !/\b(with|in)\s+[a-z]/i.test(q.replace(/years? of (hands-on|professional|work|commercial|relevant|overall|total)/gi, ''));
   if (yrsProfile && isGenericYears) {
     recordAgentAnswer(question, yrsProfile, 'yearsExperience from profile (generic years question)');
@@ -208,7 +215,7 @@ export function textAnswer(question, { numeric = false } = {}) {
   //     salaryFor() — the single source of truth — before any learned/profile-answer override
   //     (those were storing verbose strings like "280,000 PKR/month (negotiable)" that don't
   //     fit numeric fields or respect the question's currency).
-  if (/salary|compensation|\bctc\b|expected pay|pay expectation|financial expectations?|monthly gross|gross monthly|remuneration|were you making|desired (pay|salary)|current (pay|salary)/.test(q)) {
+  if (SALARY_Q.test(q)) {
     const sal = salaryFor(question, p, numeric);
     if (sal != null && sal !== '') { recordAgentAnswer(question, sal, 'currency-aware salaryFor'); return sal; }
   }
@@ -248,7 +255,7 @@ export function textAnswer(question, { numeric = false } = {}) {
 
   if (/how many years|years of (work |professional )?experience|years experience|experience (do you have|in years)/.test(q)) {
     derived = years || null; basis = 'yearsExperience from profile';
-  } else if (/salary|compensation|expected pay|pay expectation|financial expectations?|monthly gross|gross monthly|\bctc\b|remuneration|\brate\b|expectation/.test(q)) {
+  } else if (SALARY_Q.test(q) || /expected?|expectation/.test(q)) {
     derived = salaryFor(q, p, numeric); basis = 'salary from profile';
   } else if (/first name|given name/.test(q)) {
     derived = p.firstName || first || null; basis = 'name from profile';
@@ -424,6 +431,12 @@ export function resolveYesNo(question, { yesLabel, noLabel, workAuth = {}, count
     return noLabel;
   }
 
+  // Interview adjustments / disability / accessibility: the profile records none, so the
+  // truthful answer is No. Never claim a need the user did not state.
+  if (/reasonable adjustment|adjustments? (to|for) (attend|interview|participate)|require (any )?(adjustments|accommodations)|disabilit|accessibility needs/.test(q)) {
+    return noLabel;
+  }
+
   // Residence / citizenship / located-in: truthful from the user's country. A question naming a
   // country that is NOT the user's → No (a Pakistan user does not reside in California / is not a
   // U.S. citizen / federal-contractor citizenship). Naming the user's own country → Yes.
@@ -436,6 +449,13 @@ export function resolveYesNo(question, { yesLabel, noLabel, workAuth = {}, count
     if (/california|texas|new york|\bu\.?s\.?\b|united states|\buk\b|canada/.test(q) && userCountry && !/united states|\buk\b|canada/.test(userCountry)) {
       return noLabel;
     }
+  }
+
+  // Capability/proficiency questions in the languages LinkedIn applications show up in
+  // ("¿Cuentas con nivel de inglés…?", "Avez-vous de l'expérience…?", "Verfügen Sie über…?",
+  // "Hai esperienza…?", "Você tem experiência…?") — the English rule below never saw these.
+  if (/cuentas con|¿tienes|tienes experiencia|posees|nivel de ingl[eé]s|experiencia (con|en|desarrollando)|conocimientos (de|en)|dominas|voc[eê] tem|experi[eê]ncia (com|em)|possui|verf[uü]gen sie|haben sie (erfahrung|kenntnisse)|erfahrung (mit|in)|kenntnisse (in|mit)|avez[- ]vous|exp[eé]rience (avec|en)|ma[iî]trisez|possiedi|hai esperienza|esperienza (con|in)|conoscenza (di|in)/.test(q)) {
+    return yesLabel;
   }
 
   // Consent / agreement / capability: standard Yes.

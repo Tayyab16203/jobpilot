@@ -196,9 +196,16 @@ async function checkOption(page, dataJa, optText, groupName, grpIdx = -1) {
   if (!snap) return false;
   const nm = groupName || snap.name || '';
   const gi = Number.isInteger(grpIdx) ? grpIdx : -1;
-  // Verify FRESH whether an input in this group is now checked — by name, else by the enclosing
-  // fieldset index (2026 nameless groups), never via the stale/destroyed node.
+  // A LONE checkbox (consent / declaration) has no name and no fieldset, so there is no group to
+  // re-query. React also re-creates the <input> on click, destroying the `data-ja` handle and any
+  // id we captured — so asking the stale node "are you checked?" always says no, which made the
+  // next fallback click toggle the box straight back OFF. Count checked boxes in the dialog BEFORE
+  // clicking and treat "one more than before" as success.
+  const standalone = snap.type === 'checkbox' && !nm && gi < 0;
+  const checkedCount = () => page.evaluate(() => [...document.querySelectorAll('input[type="checkbox"]')].filter(i => i.checked).length).catch(() => -1);
+  const baseChecked = standalone ? await checkedCount() : -1;
   const groupChecked = async () => {
+    if (standalone) { const n = await checkedCount(); return n === baseChecked + 1; }
     if (nm) return page.evaluate(n => [...document.querySelectorAll(`input[name="${CSS.escape(n)}"]`)].some(i => i.checked), nm).catch(() => false);
     if (gi >= 0) return page.evaluate(idx => {
       const fs = [...document.querySelectorAll('fieldset, [role="group"], [role="radiogroup"]')][idx];
@@ -214,8 +221,9 @@ async function checkOption(page, dataJa, optText, groupName, grpIdx = -1) {
       await lbl.scrollIntoViewIfNeeded().catch(() => {});
       const box = await lbl.boundingBox().catch(() => null);
       await lbl.click({ force: true, timeout: 2000 }).catch(() => {});
-      // after re-render the label still clicks; also try a raw mouse click at its coords
-      if (box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2).catch(() => {});
+      // The raw mouse click is only a fallback: on a CHECKBOX the label click may already have
+      // toggled it, and clicking the same spot again would toggle it straight back off.
+      if (box && !(await groupChecked())) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2).catch(() => {});
     }
   };
   // NATIVE CDP click at the label's center — a REAL OS-level mouse event that React cannot
@@ -339,7 +347,13 @@ async function fillPage(page, dlg, ctx, job = {}) {
         // Optional consent/marketing/follow boxes: never auto-check, uncheck if preselected,
         // and never treat as blocking. These are the ones that used to stall the whole apply.
         if (isOptionalConsent(f.q) || isOptionalConsent(f.optLabel)) { if (f.checked) await loc.uncheck({ force: true }).catch(() => {}); continue; }
-        if (!f.checked && f.required) await loc.check({ force: true }).catch(() => {});
+        // Terms/privacy consent is a real gate even when LinkedIn leaves `required` off the input
+        // (it marks the SECTION "Personal data consent*" instead). Accepting it is required to apply.
+        // A 0×0 input ignores a forced check, so click through the widget like radios do.
+        if (!f.checked && (f.required || isConsentQuestion(f.q))) {
+          const okCb = await checkOption(page, f.id, f.optLabel || '', f.name || '', -1).catch(() => false);
+          if (!okCb) await loc.check({ force: true }).catch(() => {});
+        }
         if (f.checked && /follow/i.test(f.q + f.optLabel)) await loc.uncheck({ force: true }).catch(() => {});
         continue;
       }
@@ -579,7 +593,7 @@ async function analyzePage(dlg, ctx = {}) {
       const key = groupKey(f); if (seen.has(key)) continue; seen.add(key);
       g = (f.type === 'radio' ? radioByGroup : cbByGroup)[key] || [f];
       if (f.type === 'checkbox' && g.length < 2) { // standalone consent checkbox
-        decision = isOptionalConsent(f.q) ? 'leave unchecked' : (f.required ? 'check' : 'skip'); reason = 'single checkbox'; q = f.q;
+        decision = isOptionalConsent(f.q) ? 'leave unchecked' : (f.required || isConsentQuestion(f.q) ? 'check' : 'skip'); reason = 'single checkbox'; q = f.q;
       } else {
         const gm = f.grpIdx >= 0 ? groupByIdx[f.grpIdx] : null;
         q = ((gm && gm.question) || g[0].q || '').trim();
