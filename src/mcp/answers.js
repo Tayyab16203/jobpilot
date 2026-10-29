@@ -354,6 +354,20 @@ const COUNTRY_TOKENS = [
   'pakistan', 'india',
 ];
 
+// Consent / terms questions are asked in the applicant's local language. Recognizing only English
+// left German/Italian/French consent widgets unanswered even though the only real option is to
+// accept. An explicit negative phrasing ("do not agree", "nicht zustimm", "je n'accepte pas") is
+// NOT consent, so it is excluded rather than auto-agreed to.
+const CONSENT_Q = /\bagb\b|\bterms\b|\bconditions\b|\bconditions? of\b|privacy|datenschutz|confidentialit|condizioni|\btermini\b|t[eé]rminos|privacidad|polic(y|ies)|\bconsent\b|acknowledg|agree|accett|accept|zustimm|einverstanden|bedingungen|autorise|authori[sz]|i have read|certif|confirm|truthful|accurate/i;
+const NEG_CONSENT_Q = /\b(do not|don't|not)\s+(agree|accept|consent)|nicht\s+zu(stimm|)|keine\s+zustimmung|je n'accepte pas|ne pas accepter|no acepto|no estoy de acuerdo/i;
+
+/** True when the question asks the applicant to accept terms/privacy/certification. */
+export function isConsentQuestion(question) {
+  const s = String(question || '');
+  if (!s || NEG_CONSENT_Q.test(s)) return false;
+  return CONSENT_Q.test(s);
+}
+
 /**
  * Resolve a Yes/No application question truthfully from the user's work-authorization and
  * country. Pure (no profile I/O), so it is both used in production (choiceAnswer) and unit-tested.
@@ -425,7 +439,7 @@ export function resolveYesNo(question, { yesLabel, noLabel, workAuth = {}, count
   }
 
   // Consent / agreement / capability: standard Yes.
-  if (/background check|drug test|agree|consent|acknowledge|comfortable|willing|able to|can you|do you have|have you|did you|are you|familiar|experience|worked (with|on|in)|built|shipped|proficient|startup|fast.?paced|agile|environment/.test(q)) {
+  if (isConsentQuestion(q) || /background check|drug test|agree|consent|acknowledge|comfortable|willing|able to|can you|do you have|have you|did you|are you|familiar|experience|worked (with|on|in)|built|shipped|proficient|startup|fast.?paced|agile|environment/.test(q)) {
     return yesLabel;
   }
 

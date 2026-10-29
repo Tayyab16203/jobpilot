@@ -6,7 +6,7 @@
 //   • success is VERIFIED by reloading the job and reading "Application submitted"
 import { getContext } from '../agent/browser.js';
 import { getProfile } from '../profile.js';
-import { textAnswer, choiceAnswer, salaryFor } from './answers.js';
+import { textAnswer, choiceAnswer, salaryFor, isConsentQuestion } from './answers.js';
 import { learn, askLater, encounter } from '../evolve.js';
 import fs from 'fs';
 import { cvAttachmentForJob, selectCvVariant } from '../cv.js';
@@ -318,6 +318,13 @@ async function fillPage(page, dlg, ctx, job = {}) {
   // (single consent/privacy/terms boxes) are still handled inline in the per-field loop.
   const groupedCbIds = new Set();
   for (const [q, g] of Object.entries(cbGroups)) if (g.length >= 2 && q && q.length > 8) g.forEach(f => groupedCbIds.add(f.id));
+  // The Education editor renders its month/year "Dates attended" selects EMPTY even though the
+  // entry has dates. Save silently no-ops until they are set, so reuse the entry's own dates
+  // from the surrounding text (never invent dates).
+  const dlgText = await dlg.innerText().catch(() => '');
+  const datePair = dlgText.match(/(\d{1,2})\s*\/\s*(\d{4})\s*[-–]\s*(\d{1,2})\s*\/\s*(\d{4})/) || [];
+  const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  let dateSel = 0;
 
   for (const f of fields) {
     const loc = page.locator(`[data-ja="${f.id}"]`);
@@ -353,6 +360,13 @@ async function fillPage(page, dlg, ctx, job = {}) {
           const byText = (re) => selOpts[opts.findIndex(o => re.test(o))];
           if (opts.some(o => /job posting|linkedin|job board|online|search engine|other/.test(o)))
             pick = byText(/linkedin/) || byText(/job posting/) || byText(/job board|online/) || byText(/search engine/) || byText(/^other$/);
+        }
+        // Education editor dates: fill month/year selects from the entry's own dates.
+        if (!pick && datePair.length && /edit education|dates attended/i.test(dlgText) && /^(month|year)$/i.test((f.opts[0] || '').trim())) {
+          const [sm, sy, em, ey] = [datePair[1], datePair[2], datePair[3], datePair[4]];
+          const want = [MONTHS[+sm - 1], sy, MONTHS[+em - 1], ey][dateSel];
+          dateSel++;
+          if (want) pick = selOpts.find(o => o.trim() === want) || null;
         }
         // Last resort for ANY required select: never leave it empty — pick a neutral/first option.
         if (!pick && f.required && !isOptionalConsent(f.q)) {
@@ -435,7 +449,7 @@ async function fillPage(page, dlg, ctx, job = {}) {
     // 2026 consent widgets render ONE nameless radio whose visible "Yes" text is outside the
     // label, so optLabel is empty and choiceAnswer has no option text to match. The group has a
     // single option, so the answer only decides whether to check it at all.
-    if (!pick && g.length === 1 && /agree|consent|terms|privacy|policy|certif|acknowledg|confirm|authori[sz]/i.test(g[0].q || '')) {
+    if (!pick && g.length === 1 && isConsentQuestion(g[0].q)) {
       const yes = choiceAnswer(g[0].q, ['Yes', 'No']);
       if (yes && /^yes/i.test(yes)) pick = effLabels[0] || '__only_option__';
     }
@@ -524,6 +538,21 @@ async function fillPage(page, dlg, ctx, job = {}) {
   } catch {}
 }
 
+// A step transition briefly shows a loader with no fields AND no footer buttons. Reading that gap
+// as "no next/submit button" aborted otherwise-fillable forms (the school page after the resume
+// page). Wait for real content before deciding anything about the page.
+async function waitForStepRender(dlg, ms = 8000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    const hasFields = await dlg.evaluate(d => d.querySelectorAll('input:not([type="hidden"]), select, textarea').length > 0).catch(() => false);
+    if (hasFields) return true;
+    const btn = dlg.getByRole('button', { name: /submit application|continue to next step|review your application|^next$|^review$/i }).first();
+    if (await btn.isVisible().catch(() => false)) return true;
+    await SLEEP(350);
+  }
+  return false;
+}
+
 // ── REASONING / ANALYSIS STEP ─────────────────────────────────────────────────
 // Every LinkedIn Easy Apply form is different, so before (and after) filling we ANALYZE the
 // whole page: classify each field, decide the intended answer + why, and flag which required
@@ -543,11 +572,12 @@ async function analyzePage(dlg, ctx = {}) {
     if (f.type === 'hidden') continue;
     let decision = null, reason = '', kind = f.type;
     let q = f.q || f.optLabel || f.name;
+    let g = null;   // radio/checkbox group, set below; required-flag check reads it for checkboxes
 
     if (f.type === 'file') { decision = 'attach CV'; reason = 'resume upload'; }
     else if (f.type === 'radio' || f.type === 'checkbox') {
       const key = groupKey(f); if (seen.has(key)) continue; seen.add(key);
-      const g = (f.type === 'radio' ? radioByGroup : cbByGroup)[key] || [f];
+      g = (f.type === 'radio' ? radioByGroup : cbByGroup)[key] || [f];
       if (f.type === 'checkbox' && g.length < 2) { // standalone consent checkbox
         decision = isOptionalConsent(f.q) ? 'leave unchecked' : (f.required ? 'check' : 'skip'); reason = 'single checkbox'; q = f.q;
       } else {
@@ -680,10 +710,11 @@ export async function easyApply({ url, timeoutMs = 120000, dryRun = false, job =
 
     let lastProgress = '', same = 0;
     for (let step = 0; step < 15 && Date.now() - t0 < timeoutMs; step++) {
+      await waitForStepRender(dlg);
       // PER-STEP REASONING: analyze this page (what each field needs + why), fill, then
       // re-analyze and re-fill once if required fields remain. The engine reasons at EVERY
       // step of the Easy Apply, not only once or only when stuck.
-      await analyzePage(dlg, ctx).catch(() => null);
+      await analyzePage(dlg, ctx).catch(e => { if (process.env.DEBUG_EA) console.log('ANALYZE ERR', e.message.split('\n')[0]); return null; });
       await fillPage(page, dlg, ctx, job);
       await SLEEP(400);
       const recheck = await analyzePage(dlg, ctx).catch(() => null);
@@ -699,10 +730,30 @@ export async function easyApply({ url, timeoutMs = 120000, dryRun = false, job =
         await page.close().catch(() => {});
         return { ok, result: ok ? 'applied' : 'stuck', detail: ok ? `submitted + verified (${step + 1} pages)` : 'submit not confirmed', meta, used: ctx.used };
       }
+      // The Education step opens an inline editor when LinkedIn wants an entry confirmed (its
+      // "Review" button lands on the editor, not the review page). The editor's advance button is
+      // "Save", not Next/Review — click through it so the flow can continue.
+      if (process.env.DEBUG_EA) console.log('STEP', step, JSON.stringify(await dlg.evaluate(d => ({
+        text: (d.innerText || '').replace(/\s+/g, ' ').slice(0, 120),
+        buttons: [...d.querySelectorAll('button')].map(b => ((b.innerText || b.getAttribute('aria-label') || '').trim() || '')).filter(Boolean),
+      })).catch(() => ({}))));
+      const saveBtn = dlg.getByRole('button', { name: /^save$/i }).first();
+      if (process.env.DEBUG_EA) console.log('SAVE?', await saveBtn.count().catch(() => -1), await saveBtn.isVisible().catch(e => 'ERR ' + e.message.split('\n')[0]));
+      if (await saveBtn.isVisible().catch(() => false)) {
+        await saveBtn.click().catch(() => {});
+        await SLEEP(1200);
+        continue;
+      }
       const next = dlg.getByRole('button', { name: /continue to next step|review your application|^next$|^review$/i }).first();
-      if (!(await next.isVisible().catch(() => false))) { await encounter('easy_apply', 'no next/submit button', { url, page, scope: dlg }); break; }
+      if (!(await next.isVisible().catch(() => false))) {
+        // Give a slow render one more chance before declaring the page stuck.
+        await waitForStepRender(dlg, 6000);
+        if (!(await next.isVisible().catch(() => false)) && !(await submit.isVisible().catch(() => false))) {
+          await encounter('easy_apply', 'no next/submit button', { url, page, scope: dlg }); break;
+        }
+      }
       await next.click().catch(() => {});
-      await SLEEP(1600);
+      await waitForStepRender(dlg, 8000);
       const st = await dlg.evaluate(SCAN).catch(() => ({ progress: '', errors: [] }));
       if (st.progress === lastProgress && st.progress) {
         same++;
@@ -841,6 +892,7 @@ export async function applyEasyApplyWithAnswers({ url, answers = {}, timeoutMs =
     const dlg = opened.dlg;
     let lastProgress = '', same = 0;
     for (let step = 0; step < 15 && Date.now() - t0 < timeoutMs; step++) {
+      await waitForStepRender(dlg);
       await fillPage(page, dlg, ctx, job);
       await SLEEP(500);
       const submit = dlg.getByRole('button', { name: /submit application/i }).first();
@@ -852,10 +904,12 @@ export async function applyEasyApplyWithAnswers({ url, answers = {}, timeoutMs =
         await page.close().catch(() => {});
         return { ok: okv, result: okv ? 'applied' : 'stuck', detail: okv ? `submitted + verified (${step + 1} pages)` : 'submit not confirmed', used: ctx.used };
       }
+      const saveBtn = dlg.getByRole('button', { name: /^save$/i }).first();
+      if (await saveBtn.isVisible().catch(() => false)) { await saveBtn.click().catch(() => {}); await SLEEP(1200); continue; }
       const next = dlg.getByRole('button', { name: /continue to next step|review your application|^next$|^review$/i }).first();
-      if (!(await next.isVisible().catch(() => false))) break;
+      if (!(await next.isVisible().catch(() => false))) { await waitForStepRender(dlg, 6000); if (!(await next.isVisible().catch(() => false))) break; }
       await next.click().catch(() => {});
-      await SLEEP(1600);
+      await waitForStepRender(dlg, 8000);
       const st = await dlg.evaluate(SCAN).catch(() => ({ progress: '' }));
       if (st.progress && st.progress === lastProgress) { if (++same >= 2) { const a = await analyzePage(dlg, ctx).catch(() => null); const blk = a ? a.blocking.map(b => `${b.q} (${b.reason})`).join(' | ') : ''; await discard(page); await page.close(); return { ok: false, result: 'stuck', detail: 'could not advance — ' + (blk || 'validation'), blocking: a?.blocking || [] }; } } else same = 0;
       lastProgress = st.progress;
