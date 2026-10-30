@@ -513,6 +513,17 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
       return { ok: false, result: 'needs_answers', detail: 'needs your answer: ' + unanswered.slice(0, 4).join(' | ').slice(0, 300), questions: unanswered, url: page.url() };
     }
 
+    if (/\/review-module(?:\/|$)/.test(moduleUrl)) {
+      const submit = frame.locator('[data-testid="submit-application-button"]').first();
+      try {
+        await submit.waitFor({ state: 'visible', timeout: 30000 });
+        await submit.scrollIntoViewIfNeeded();
+        await submit.click({ timeout: 10000 });
+        prevModuleUrl = moduleUrl;
+        continue;
+      } catch {}
+    }
+
     // Stall guard: if we have revisited this exact module 3 times with no progress and no
     // unanswered required question, the primary control is dead/placeholder (e.g. SmartApply's
     // off-screen hp-continue-button-N) — stop and record the encounter for self-evolution rather
