@@ -54,11 +54,11 @@ const FORM_RE = /indeedapply\/form\//i;
 // redirects to a .../indeedapply/form/<module> URL. Poll the SmartApply tab's URL until it reaches
 // a form module (or a terminal state the loop can handle) so we never fill/advance the interstitial
 // or site-chrome. The tab object itself can change across the redirect, so re-find it each tick.
-async function waitForFormModule(ctx, { timeoutMs = 15000 } = {}) {
+async function waitForFormModule(ctx, { timeoutMs = 15000, before = [] } = {}) {
   const deadline = Date.now() + timeoutMs;
-  let last = await findSmartApplyTab(ctx);
+  let last = await findSmartApplyTab(ctx, before);
   while (Date.now() < deadline) {
-    const page = await findSmartApplyTab(ctx);
+    const page = await findSmartApplyTab(ctx, before);
     if (page) {
       last = page;
       let url = '';
@@ -98,11 +98,12 @@ async function visibleHumanCheck(page) {
   return false;
 }
 
-async function findSmartApplyTab(ctx) {
-  for (const p of ctx.pages()) {
-    try { if (SMARTAPPLY_RE.test(p.url())) return p; } catch {}
-  }
-  return null;
+// Prefer a SmartApply tab that did not exist before this apply started. Stale SmartApply tabs
+// from earlier runs sit in the window; picking the first match drove the wrong job's form.
+async function findSmartApplyTab(ctx, before = []) {
+  const matches = ctx.pages().filter(p => { try { return SMARTAPPLY_RE.test(p.url()); } catch { return false; } });
+  const fresh = matches.filter(p => !before.includes(p));
+  return fresh[fresh.length - 1] || matches[matches.length - 1] || null;
 }
 
 // SmartApply renders its form (resume selection, questions, review + "Submit your application")
@@ -196,6 +197,34 @@ async function fillStep(frame) {
 
     const fields = [];
     const groups = {};
+    // Custom dropdowns: SmartApply renders SELECT screener questions as a role=combobox div
+    // (data-testid input-<name>-select-list-select-list) with role=option children — there is
+    // no <select> element, so the native select path never sees them and Continue stays blocked
+    // with "Choose an option to continue."
+    const combos = [];
+    for (const el of document.querySelectorAll('[role="combobox"]')) {
+      const tid = el.getAttribute('data-testid') || '';
+      const m = tid.match(/^input-(.+)-select-list-select-list$/);
+      if (!m) continue;
+      const cur = (el.innerText || '').trim();
+      if (!/^select an option$/i.test(cur)) continue; // already answered
+      const by = el.getAttribute('aria-labelledby');
+      const label = (by && document.getElementById(by)?.innerText || '').replace(/\s+/g, ' ').trim();
+      combos.push({ name: m[1], label });
+    }
+    // SmartApply renders its screener inputs with opaque names (q_<hash>) and no attached
+    // <label>; the question wording lives only in window._initialData.screenerQuestions. Map
+    // name → question text so the answer engine sees the real question, not the hash.
+    const initial = {}, initialOptions = {}, initialReq = {};
+    try {
+      const qs = (window._initialData && window._initialData.screenerQuestions) || [];
+      for (const q of qs) {
+        if (!q || !q.name) continue;
+        initial[q.name] = String(q.labelHtml || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        initialOptions[q.name] = (q.options || []).map(o => String(o.label ?? o.value ?? '')).filter(Boolean);
+        initialReq[q.name] = !!q.required;
+      }
+    } catch {}
     for (const el of document.querySelectorAll('input,select,textarea')) {
       if (el.type === 'hidden' || el.name === 'g-recaptcha-response') continue;
       if (el.type === 'radio' || el.type === 'checkbox') {
@@ -209,15 +238,15 @@ async function fillStep(frame) {
       }
       fields.push({ tag: el.tagName, type: el.type || '', name: el.name || el.id || '', label: textOf(el), required: el.required, value: el.value || '', options: el.tagName === 'SELECT' ? [...el.options].map(o => (o.text || o.value || '').trim()).filter(Boolean) : [] });
     }
-    return { fields, groups: Object.values(groups) };
-  }).catch(() => ({ fields: [], groups: [] }));
+    return { fields, groups: Object.values(groups), initial, initialOptions, initialReq, combos };
+  }).catch(() => ({ fields: [], groups: [], initial: {}, initialOptions: {}, initialReq: {}, combos: [] }));
 
   const unanswered = [];
 
   // ── Radio / checkbox groups: pick a real option label, select by name+value with verified
   //    click + dispatched React events, fall back to Playwright .check(), then verify .checked.
   for (const g of scan.groups || []) {
-    const q = g.question || g.name;
+    const q = (scan.initial && scan.initial[g.name]) || g.question || g.name;
     if (!q) continue;
     if (g.options.some(o => o.checked)) continue; // already answered (e.g. harvested/prefilled)
     try {
@@ -271,9 +300,36 @@ async function fillStep(frame) {
     } catch {}
   }
 
+  // ── Custom dropdowns (role=combobox): open the list, click the matching role=option.
+  for (const c of scan.combos || []) {
+    const q = (scan.initial && scan.initial[c.name]) || c.label || c.name;
+    const opts = (scan.initialOptions && scan.initialOptions[c.name]) || [];
+    const required = !!(scan.initialReq && scan.initialReq[c.name]);
+    try {
+      const pick = choiceAnswer(q, opts);
+      if (!pick) { if (required) { unanswered.push(q); askLater(q); } continue; }
+      const trigger = `[data-testid="input-${c.name}-select-list-select-list"]`;
+      await frame.click(trigger, { timeout: 3000 }).catch(() => {});
+      await SLEEP(500);
+      let chosen = await frame.locator(`[data-testid="input-${c.name}-select-list-${pick}"]`).first()
+        .click({ timeout: 3000 }).then(() => true).catch(() => false);
+      if (!chosen) {
+        const re = new RegExp('^\\s*' + String(pick).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$', 'i');
+        chosen = await frame.locator('li[role="option"],[role="option"]').filter({ hasText: re }).first()
+          .click({ timeout: 3000 }).then(() => true).catch(() => false);
+      }
+      const ok = await frame.evaluate(({ sel, pick }) => {
+        const el = document.querySelector(sel);
+        const t = (el?.innerText || '').trim().toLowerCase();
+        return !!t && t !== 'select an option' && t.includes(String(pick).toLowerCase());
+      }, { sel: trigger, pick }).catch(() => false);
+      if (!ok && required) { unanswered.push(q); askLater(q); }
+    } catch {}
+  }
+
   // ── SELECT + text/number fields.
   for (const f of scan.fields || []) {
-    const q = f.label || f.name;
+    const q = (scan.initial && scan.initial[f.name]) || f.label || f.name;
     if (!q) continue;
     try {
       if (f.tag === 'SELECT') {
@@ -309,65 +365,93 @@ async function clickAdvance(frame) {
   // SmartApply addresses the button by data-testid (e.g. continue-button, form-action-continue)
   // and often puts the visible label on a nested <span>, so match by testid OR own/nested-span
   // text. NEVER match or click the reCAPTCHA control.
-  const inPage = await frame.evaluate(() => {
-    const SUBMIT = /submit your application|submit application|^submit$/i;
-    const CONT = /continue|review your application|^review$|^next$/i;
-    const TID = /continue-button|form-action-continue|submit|review|next/i;
-    const isCaptcha = el =>
-      el.id === 'g-recaptcha-response' ||
-      !!el.closest('.g-recaptcha, [data-testid*="recaptcha" i], iframe[src*="recaptcha" i]');
-    const label = el => {
-      const own = (el.innerText || '').trim();
-      if (own) return own;
-      for (const sp of el.querySelectorAll('span')) { const t = (sp.textContent || '').trim(); if (t) return t; }
-      return (el.getAttribute('aria-label') || el.getAttribute('data-testid') || '').trim();
-    };
-    const textMatch = (el, re) => {
-      const own = (el.innerText || '').trim();
-      if (own && re.test(own)) return true;
-      for (const sp of el.querySelectorAll('span')) { if (re.test((sp.textContent || '').trim())) return true; }
-      return false;
-    };
-    // Only clickable controls (BUTTON / role=button), never the wrapper DIV/FIELDSET/LABEL that
-    // SmartApply also tags with data-testid. A bare [data-testid] that is not a button is layout.
-    // NB: do not filter on offsetParent — SmartApply's footer Continue is position:fixed, whose
-    // offsetParent is null even though it is visible, which would wrongly exclude the real button.
-    const clickable = [...document.querySelectorAll('button, [role="button"]')]
-      .filter(el => !el.disabled && !isCaptcha(el));
-    // SmartApply's canonical primary action — exact testids. Prefer these over the looser regex so
-    // we hit the real footer button, not a duplicate/placeholder "hp-continue-button-N".
-    const CANON = /^(continue-button|form-action-continue|submit-button|review-button)$/i;
-    // Prefer a final submit, then the canonical testid, then continue/review/next by testid or text.
-    const pick = re =>
-      clickable.find(el => { const tid = el.getAttribute('data-testid') || ''; return tid && re.test(tid); }) ||
-      clickable.find(el => textMatch(el, re));
-    const primary =
-      pick(SUBMIT) ||
-      clickable.find(el => CANON.test(el.getAttribute('data-testid') || '')) ||
-      clickable.find(el => { const tid = el.getAttribute('data-testid') || ''; return tid && TID.test(tid); }) ||
-      pick(CONT);
-    if (primary) { const l = label(primary); primary.click(); return l || 'advance'; }
-    return null;
-  }).catch(() => null);
-  if (inPage) return inPage;
+  // The primary control briefly disables while the module commits a freshly filled answer, so
+  // poll for an enabled, visible primary instead of giving up on the first look.
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const inPage = await frame.evaluate(() => {
+      const SUBMIT = /submit your application|submit application|^submit$/i;
+      const CONT = /continue|review your application|^review$|^next$/i;
+      const TID = /continue-button|form-action-continue|submit|review|next/i;
+      const isCaptcha = el =>
+        el.id === 'g-recaptcha-response' ||
+        !!el.closest('.g-recaptcha, [data-testid*="recaptcha" i], iframe[src*="recaptcha" i]');
+      const label = el => {
+        const own = (el.innerText || '').trim();
+        if (own) return own;
+        for (const sp of el.querySelectorAll('span')) { const t = (sp.textContent || '').trim(); if (t) return t; }
+        return (el.getAttribute('aria-label') || el.getAttribute('data-testid') || '').trim();
+      };
+      const textMatch = (el, re) => {
+        const own = (el.innerText || '').trim();
+        if (own && re.test(own)) return true;
+        for (const sp of el.querySelectorAll('span')) { if (re.test((sp.textContent || '').trim())) return true; }
+        return false;
+      };
+      // Only clickable controls (BUTTON / role=button), never the wrapper DIV/FIELDSET/LABEL that
+      // SmartApply also tags with data-testid. A bare [data-testid] that is not a button is layout.
+      // NB: do not filter on offsetParent — SmartApply's footer Continue is position:fixed, whose
+      // offsetParent is null even though it is visible, which would wrongly exclude the real button.
+      const clickable = [...document.querySelectorAll('button, [role="button"]')]
+        .filter(el => !el.disabled && !isCaptcha(el))
+        .filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+      // SmartApply's canonical primary action — exact testids. Prefer these over the looser regex so
+      // we hit the real footer button, not a duplicate/placeholder "hp-continue-button-N".
+      const CANON = /^(continue-button|form-action-continue|submit-button|review-button)$/i;
+      // Prefer a final submit, then the canonical testid, then continue/review/next by testid or text.
+      const pick = re =>
+        clickable.find(el => { const tid = el.getAttribute('data-testid') || ''; return tid && re.test(tid); }) ||
+        clickable.find(el => textMatch(el, re));
+      const primary =
+        pick(SUBMIT) ||
+        clickable.find(el => CANON.test(el.getAttribute('data-testid') || '')) ||
+        clickable.find(el => { const tid = el.getAttribute('data-testid') || ''; return tid && TID.test(tid); }) ||
+        pick(CONT);
+      if (primary) {
+        return { label: label(primary) || 'advance', tid: primary.getAttribute('data-testid') || '' };
+      }
+      return null;
+    }).catch(() => null);
 
-  // Fallback: Playwright locator click works across the real (cross-origin) form frame where an
-  // in-page document.click can be unreliable.
-  for (const tid of ['form-action-continue', 'continue-button', 'submit-button']) {
-    try {
-      const byTid = frame.getByTestId(tid).first();
-      if (await byTid.count().catch(() => 0)) { await byTid.click({ timeout: 2500 }); return tid; }
-    } catch {}
-  }
-  const NAME = /submit your application|submit application|continue|review your application|review|next/i;
-  try {
-    const byRole = frame.getByRole('button', { name: NAME }).first();
-    if (await byRole.count().catch(() => 0)) {
-      const txt = (await byRole.innerText().catch(() => '')).trim();
-      await byRole.click({ timeout: 2500 });
-      return txt || 'advance';
+    if (inPage) {
+      // A synthetic DOM .click() does not reliably run this module's React handler (the questions
+      // footer stayed on the page while a real pointer click advanced). Click through Playwright,
+      // which dispatches a trusted pointer sequence, and keep the DOM click as a last resort.
+      if (inPage.tid) {
+        try {
+          const byTid = frame.locator(`[data-testid="${inPage.tid}"]`).first();
+          if (await byTid.count().catch(() => 0)) {
+            await byTid.click({ timeout: 4000 });
+            return inPage.label;
+          }
+        } catch {}
+      }
+      try {
+        const byRole = frame.getByRole('button', { name: new RegExp(`^\\s*${inPage.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i') }).first();
+        if (await byRole.count().catch(() => 0)) {
+          await byRole.click({ timeout: 4000 });
+          return inPage.label;
+        }
+      } catch {}
+      // Last resort: in-page click on the element we identified.
+      const clicked = await frame.evaluate(tid => {
+        const el = tid
+          ? document.querySelector(`button[data-testid="${tid}"], [role="button"][data-testid="${tid}"]`)
+          : null;
+        if (el) { el.click(); return true; }
+        return false;
+      }, inPage.tid).catch(() => false);
+      if (clicked) return inPage.label;
     }
-  } catch {}
+
+    // Classic testids (older SmartApply builds) are worth one Playwright shot even before retrying.
+    for (const tid of ['form-action-continue', 'continue-button', 'submit-button']) {
+      try {
+        const byTid = frame.getByTestId(tid).first();
+        if (await byTid.count().catch(() => 0)) { await byTid.click({ timeout: 2500 }); return tid; }
+      } catch {}
+    }
+    await SLEEP(800);
+  }
   return null;
 }
 
@@ -390,7 +474,9 @@ async function findDisabledPrimary(frame) {
       for (const sp of el.querySelectorAll('span')) { if (re.test((sp.textContent || '').trim())) return true; }
       return false;
     };
-    const buttons = [...document.querySelectorAll('button, [role="button"]')].filter(el => !isCaptcha(el));
+    const buttons = [...document.querySelectorAll('button, [role="button"]')]
+      .filter(el => !isCaptcha(el))
+      .filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
     const match = el => {
       const tid = el.getAttribute('data-testid') || '';
       if (tid && (CANON.test(tid) || TID.test(tid))) return true;
@@ -409,6 +495,50 @@ async function confirmed(page) {
     } catch {}
   }
   return false;
+}
+
+// SmartApply shows its site chrome (and sometimes a "Preparing…" line) for several seconds
+// before the current module paints its real controls. Stepping during that window finds
+// nothing, clicks nothing, and the stall guard gives up on a page that was still loading.
+// Wait until the frame holds real form controls or a primary action (or the page confirms).
+async function waitForModulePaint(page, { timeoutMs = 25000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let reloaded = false;
+  while (Date.now() < deadline) {
+    const frame = await contentFrame(page);
+    const state = await frame.evaluate(() => {
+      if (/preparing review|preparing your application/i.test(document.body?.innerText || '')) return 'waiting';
+      // reCAPTCHA injects a textarea early; it is not a form control and must not count as paint.
+      const isChrome = el => el.name === 'g-recaptcha-response'
+        || !!el.closest('.g-recaptcha, [data-testid*="recaptcha" i], iframe');
+      const controls = [...document.querySelectorAll('input:not([type="hidden"]),select,textarea')]
+        .filter(el => !isChrome(el)).length;
+      // The questions module is a federated remote script; until it loads there are zero real
+      // controls, only site chrome. Its inputs are the q_* screener fields.
+      if (/questions-module/i.test(location.href || '')) return controls > 0 ? 'painted' : 'waiting';
+      const action = [...document.querySelectorAll('button,[role="button"]')].some(el => {
+        if (el.disabled) return false;
+        const tid = el.getAttribute('data-testid') || '';
+        const label = (el.innerText || '').trim();
+        return /continue-button|form-action-continue|submit|review|next/i.test(tid)
+          || /continue|submit|review|next/i.test(label);
+      });
+      return controls > 0 || action ? 'painted' : 'waiting';
+    }).catch(() => 'waiting');
+    if (state === 'painted') return frame;
+    if (await confirmed(page)) return null;
+    // A failed remote load leaves the questions module permanently blank; one reload re-runs the
+    // loader and usually paints the inputs.
+    if (!reloaded && Date.now() > deadline - timeoutMs + 12000
+        && /questions-module/i.test(String((() => { try { return frame.url(); } catch { return page.url(); } })()))) {
+      reloaded = true;
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await SLEEP(1500);
+      continue;
+    }
+    await SLEEP(1000);
+  }
+  return await contentFrame(page);
 }
 
 /**
@@ -431,10 +561,11 @@ export async function humanAssistedApply(args) {
 
 async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
   const ctx = await getContext();
+  const before = ctx.pages();
   let page;
 
   if (resume) {
-    page = await findSmartApplyTab(ctx);
+    page = await findSmartApplyTab(ctx, before);
     pageRef.page = page;
     if (!page) return { ok: false, result: 'error', detail: 'no open SmartApply tab to resume — start the apply again', url: jobUrl };
     await page.bringToFront().catch(() => {});
@@ -467,11 +598,11 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
     }).catch(() => false);
     if (!entered) return { ok: false, result: 'no_apply', detail: 'no Indeed Apply button on this posting', url: jobUrl };
     await SLEEP(6000);
-    const sa = await findSmartApplyTab(ctx);
+    const sa = await findSmartApplyTab(ctx, before);
     if (sa) { page = sa; pageRef.page = sa; }
     // Wait for the interstitial (applybyapplyablejobid) to redirect to a real form module before
     // the step loop tries to fill/advance — the fixed SLEEP above does not guarantee the redirect.
-    page = (await waitForFormModule(ctx)) || page;
+    page = (await waitForFormModule(ctx, { before })) || page;
     pageRef.page = page;
   }
 
@@ -482,8 +613,6 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
   let prevModuleUrl = '';
   let sameModuleClicks = 0;
   for (let step = 0; step < 10; step++) {
-    await SLEEP(2000);
-
     // Confirmation BEFORE human-check: a solved captcha leaves its challenge iframe in the DOM on
     // the confirmation page, so checking the captcha first would falsely re-pause a finished apply.
     if (await confirmed(page)) {
@@ -500,13 +629,30 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
       };
     }
 
-    const frame = await contentFrame(page);
+    const frame = await waitForModulePaint(page);
+    if (!frame) return { ok: true, result: 'submitted', detail: 'Application submitted + confirmed', url: page.url() };
 
     // Which SmartApply module are we on? (path after /form/, query stripped). Used for the stall
     // guard: resume-selection-module/..., questions-module/questions/1, review-module, etc.
     let moduleUrl = '';
     try { moduleUrl = (frame.url() || page.url()).split('?')[0]; } catch { moduleUrl = page.url(); }
     if (prevModuleUrl && moduleUrl === prevModuleUrl) sameModuleClicks++; else sameModuleClicks = 0;
+
+    // The review module renders a "Preparing review…" placeholder first; the Submit control
+    // appears only once that resolves (often several seconds). Without this wait the stall
+    // guard fires on a healthy review page before there is anything to click.
+    if (/review-module/i.test(moduleUrl)) {
+      const readyBy = Date.now() + 25000;
+      while (Date.now() < readyBy) {
+        const ready = await frame.evaluate(() => {
+          const b = document.querySelector('[data-testid="submit-application-button"], [data-testid="submit-button"]');
+          return !!(b && !b.disabled);
+        }).catch(() => false);
+        if (ready) break;
+        if (await confirmed(page)) return { ok: true, result: 'submitted', detail: 'Application submitted + confirmed', url: page.url() };
+        await SLEEP(1000);
+      }
+    }
 
     const unanswered = await fillStep(frame);
     if (unanswered.length) {
@@ -524,6 +670,17 @@ async function _humanAssistedApply({ jobUrl, resume = false }, pageRef) {
 
     const advanced = await clickAdvance(frame);
     prevModuleUrl = moduleUrl;
+    // The final Submit can take longer than one loop beat (reCAPTCHA check + post-apply
+    // redirect). Wait for the outcome here so a slow submit is not mistaken for a stall or
+    // for a disabled Continue button.
+    if (advanced && /submit/i.test(String(advanced))) {
+      const doneBy = Date.now() + 30000;
+      while (Date.now() < doneBy) {
+        if (await confirmed(page)) return { ok: true, result: 'submitted', detail: 'Application submitted + confirmed', url: page.url() };
+        if (await visibleHumanCheck(page)) break;
+        await SLEEP(1500);
+      }
+    }
     if (!advanced) {
       // No ENABLED primary and no confirmation — either done, or the Continue button is present
       // but disabled pending answers. Give the page a beat, then disambiguate.

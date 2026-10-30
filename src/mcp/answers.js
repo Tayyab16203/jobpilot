@@ -217,9 +217,17 @@ export function textAnswer(question, { numeric = false } = {}) {
   // evolution memory so an older human-readable answer like "2 weeks" cannot leak into
   // a numeric-only field.
   if (/notice period[^?]*\bdays?\b/.test(q)) {
-    const days = String(parseInt(ans(p, 'notice period', '14')) || 14);
-    recordAgentAnswer(question, days, 'notice period from profile (days)');
-    return days;
+    // Learned "0" is almost always a mis-recorded agent answer (0 days is rare and the profile
+    // carries the real notice period). Prefer a positive learned count, else parse the profile.
+    const learnedDays = parseInt(learnedAnswer(question), 10);
+    const raw = String(ans(p, 'notice period', '')).trim();
+    const profDays = parseInt(raw, 10);
+    const weeks = /week/i.test(raw);
+    const days = learnedDays > 0 ? learnedDays
+      : profDays > 0 ? (weeks ? profDays * 7 : profDays)
+      : 14;
+    recordAgentAnswer(question, String(days), 'notice period from profile (days)');
+    return String(days);
   }
 
   // 1. Evolution memory (user-taught or harvested) — highest trust.
@@ -543,7 +551,11 @@ export function choiceAnswer(question, options) {
     derived = find(/linkedin/) || find(/job board|online|other/) || opts[0];
     basis = 'LinkedIn as application source';
   } else if (/notice/.test(q)) {
-    derived = find(/2 weeks|two weeks|immediate|less than|1 month/) || opts[0];
+    // Numeric day options: match the profile/learned notice period, not the first option
+    // ("0" = available immediately would misstate a 2-week notice).
+    const days = parseInt(textAnswer(question), 10);
+    derived = (Number.isFinite(days) ? opts.find(o => parseInt(o, 10) === days) : null)
+      || find(/2 weeks|two weeks|less than|1 month/) || opts[0];
     basis = 'notice period from profile';
   } else if (/degree|education|qualification/.test(q)) {
     derived = find(new RegExp((p.education || 'bachelor').split(' ')[0], 'i')) || find(/bachelor/) || null;
